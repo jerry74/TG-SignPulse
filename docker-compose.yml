@@ -3,7 +3,7 @@ services:
     image: ghcr.io/akasls/tg-signpulse:latest
     container_name: tg-signpulse
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./data:/data
     environment:

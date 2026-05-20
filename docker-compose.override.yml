@@ -1,0 +1,30 @@
+services:
+  ai-solver:
+    image: python:3.12-slim
+    command: python /app/ai_solver_server.py
+    user: "65534:65534"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - ./ai_solver_server.py:/app/ai_solver_server.py:ro
+    restart: unless-stopped
+
+  app:
+    depends_on:
+      - ai-solver
+    volumes:
+      - ./tg_signer/core.py:/app/tg_signer/core.py:ro
+    environment:
+      - TZ=Asia/Taipei
+      - APP_SECRET_KEY=${APP_SECRET_KEY}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - TG_SESSION_MODE=file
+      - TG_SESSION_NO_UPDATES=0
+      - OPENAI_API_KEY=local-math-solver
+      - OPENAI_BASE_URL=http://ai-solver:8000/v1
+      - OPENAI_MODEL=local-math-solver
