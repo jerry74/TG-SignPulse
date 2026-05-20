@@ -1150,6 +1150,42 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         except (TypeError, ValueError):
             return max(float(fallback_delay or 0), 0.0)
 
+    @staticmethod
+    def _is_transient_preheat_error(exc: Exception) -> bool:
+        exc_name = type(exc).__name__
+        exc_text = str(exc)
+        return exc_name == "BadMsgNotification" or "BadMsgNotification" in exc_text
+
+    async def _retry_preheat_chat(self, chat_id: int, attempts: int = 2) -> bool:
+        last_error: Optional[Exception] = None
+        for attempt in range(1, max(attempts, 1) + 1):
+            try:
+                await asyncio.sleep(float(attempt))
+                await self.app.get_chat(chat_id)
+                self.log(
+                    f"Preheated peer after transient retry: {chat_id}",
+                    level="WARNING",
+                )
+                return True
+            except Exception as exc:
+                last_error = exc
+                if not self._is_transient_preheat_error(exc):
+                    self.log(
+                        f"Preheat retry stopped by non-transient error: {type(exc).__name__}: {exc}",
+                        level="WARNING",
+                    )
+                    return False
+                self.log(
+                    f"Preheat retry {attempt}/{attempts} hit transient error: {type(exc).__name__}: {exc}",
+                    level="WARNING",
+                )
+        if last_error:
+            self.log(
+                f"Preheat retries exhausted for chat_id={chat_id}: {type(last_error).__name__}: {last_error}",
+                level="WARNING",
+            )
+        return False
+
     def _load_chat_cache(self) -> List[dict]:
         try:
             cache_file = self.tasks_dir / self._account / "chats_cache.json"
@@ -1468,13 +1504,24 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                         f"Failed to preheat chat_id {chat.chat_id}: {last_error}"
                     ) from last_error
             else:
-                self.log(
-                    f"预热会话失败: chat_id={chat.chat_id}, error={type(e).__name__}: {e}",
-                    level="ERROR",
-                )
-                raise RuntimeError(
-                    f"Failed to preheat chat_id {chat.chat_id}: {e}"
-                ) from e
+                if self._is_transient_preheat_error(e):
+                    self.log(
+                        f"预热会话遇到 Telegram 暂时性错误，将重试后降级继续: chat_id={chat.chat_id}, error={type(e).__name__}: {e}",
+                        level="WARNING",
+                    )
+                    if not await self._retry_preheat_chat(chat.chat_id):
+                        self.log(
+                            f"预热会话仍失败，跳过预热并继续执行任务: chat_id={chat.chat_id}",
+                            level="WARNING",
+                        )
+                else:
+                    self.log(
+                        f"预热会话失败: chat_id={chat.chat_id}, error={type(e).__name__}: {e}",
+                        level="ERROR",
+                    )
+                    raise RuntimeError(
+                        f"Failed to preheat chat_id {chat.chat_id}: {e}"
+                    ) from e
         self.log(self._describe_chat_run(chat))
         total_actions = len(chat.actions)
         if total_actions == 0:
