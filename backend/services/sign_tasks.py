@@ -3355,13 +3355,21 @@ class SignTaskService:
                     else:
                         # File mode: prefer in-memory to avoid SQLite "database is locked"
                         # Try to load session_string from .session_string file as fallback
-                        session_string = load_session_string_file(
-                            session_dir, account_name
-                        )
-                        if session_string:
-                            use_in_memory = True
-                        else:
+                        if requires_updates:
+                            # Tasks that wait for bot replies must share the same live
+                            # client opened during the preflight check. Starting a
+                            # second in-memory client from the same auth key can corrupt
+                            # Telegram msg_seqno and trigger BadMsgNotification storms.
+                            session_string = None
                             use_in_memory = False
+                        else:
+                            session_string = load_session_string_file(
+                                session_dir, account_name
+                            )
+                            if session_string:
+                                use_in_memory = True
+                            else:
+                                use_in_memory = False
 
                         if os.getenv("SIGN_TASK_FORCE_IN_MEMORY") == "0":
                             # Explicitly disabled in-memory mode

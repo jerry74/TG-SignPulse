@@ -19,6 +19,7 @@ services:
       - ai-solver
     volumes:
       - ./tg_signer/core.py:/app/tg_signer/core.py:ro
+      - ./backend/services/sign_tasks.py:/app/backend/services/sign_tasks.py:ro
     environment:
       - TZ=Asia/Taipei
       - APP_SECRET_KEY=${APP_SECRET_KEY}

@@ -255,6 +255,71 @@ def _read_positive_int_env(name: str, default: int, minimum: int = 1) -> int:
         return default
 
 
+def _is_bad_msg_notification_result(result: Any) -> bool:
+    return type(result).__name__ == "BadMsgNotification"
+
+
+def _empty_update_difference(query: Any) -> Optional[Any]:
+    if isinstance(query, raw.functions.updates.GetChannelDifference):
+        from pyrogram.raw.types.updates import ChannelDifferenceEmpty
+
+        return ChannelDifferenceEmpty(pts=query.pts, timeout=0, final=True)
+    if isinstance(query, raw.functions.updates.GetDifference):
+        from pyrogram.raw.types.updates import DifferenceEmpty
+
+        return DifferenceEmpty(date=query.date, seq=query.pts)
+    return None
+
+
+def _get_invoke_lock(client: Any) -> asyncio.Lock:
+    lock = getattr(client, "_tg_signpulse_invoke_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        setattr(client, "_tg_signpulse_invoke_lock", lock)
+    return lock
+
+
+async def _call_original_invoke(self, query, *args, **kwargs):
+    async with _get_invoke_lock(self):
+        return await _original_invoke(self, query, *args, **kwargs)
+
+
+async def _invoke_with_badmsg_retry(self, query, *args, **kwargs):
+    max_retries = _read_positive_int_env("TG_BADMSG_RETRY_ATTEMPTS", 6, 1)
+    base_delay = 0.5
+    for attempt in range(max_retries + 1):
+        result = await _call_original_invoke(self, query, *args, **kwargs)
+        if not _is_bad_msg_notification_result(result):
+            return result
+
+        if attempt < max_retries:
+            logger.warning(
+                "Telegram returned BadMsgNotification for %s, retrying (%s/%s): %s",
+                type(query).__name__,
+                attempt + 1,
+                max_retries,
+                result,
+            )
+            await asyncio.sleep(base_delay * (2 ** attempt) + random.uniform(0, 0.5))
+            continue
+
+        logger.warning(
+            "Telegram returned BadMsgNotification for %s after %s retries: %s",
+            type(query).__name__,
+            max_retries,
+            result,
+        )
+
+        empty_difference = _empty_update_difference(query)
+        if empty_difference is not None:
+            logger.warning("Drop updates for %s after BadMsgNotification retries", type(query).__name__)
+            return empty_difference
+
+        raise ConnectionError(
+            f"Telegram returned BadMsgNotification for {type(query).__name__}: {result}"
+        )
+
+
 async def _patched_invoke(self, query, *args, **kwargs):
     if isinstance(query, (raw.functions.updates.GetChannelDifference, raw.functions.updates.GetDifference)):
         # Disable Pyrogram's internal sleep and retry mechanisms to prevent blocking the semaphore indefinitely
@@ -267,7 +332,7 @@ async def _patched_invoke(self, query, *args, **kwargs):
             base_delay = 1.0
             for attempt in range(max_retries + 1):
                 try:
-                    return await _original_invoke(self, query, *args, **kwargs)
+                    return await _invoke_with_badmsg_retry(self, query, *args, **kwargs)
                 except Exception as e:
                     err_str = str(e).lower()
                     if isinstance(e, asyncio.TimeoutError) or "timeout" in err_str or "connection" in err_str or "flood" in err_str or "network" in err_str:
@@ -280,16 +345,11 @@ async def _patched_invoke(self, query, *args, **kwargs):
 
                         logger.warning(f"Drop updates for {type(query).__name__} due to error: {e}")
 
-                        if isinstance(query, raw.functions.updates.GetChannelDifference):
-                            from pyrogram.raw.types.updates import (
-                                ChannelDifferenceEmpty,
-                            )
-                            return ChannelDifferenceEmpty(pts=query.pts, timeout=0, final=True)
-                        elif isinstance(query, raw.functions.updates.GetDifference):
-                            from pyrogram.raw.types.updates import DifferenceEmpty
-                            return DifferenceEmpty(date=query.date, seq=query.pts)
+                        empty_difference = _empty_update_difference(query)
+                        if empty_difference is not None:
+                            return empty_difference
                     raise
-    return await _original_invoke(self, query, *args, **kwargs)
+    return await _invoke_with_badmsg_retry(self, query, *args, **kwargs)
 
 BaseClient.invoke = _patched_invoke
 
@@ -1252,6 +1312,38 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
 
         return None
 
+    @staticmethod
+    def _normalize_chat_username(username: Optional[str]) -> Optional[str]:
+        if not username:
+            return None
+        username = str(username).strip().lstrip("@")
+        return username or None
+
+    async def _preheat_chat_by_username(
+        self,
+        chat: SignChatV3,
+        username: str,
+        reason: str,
+    ) -> bool:
+        username = self._normalize_chat_username(username)
+        if not username:
+            return False
+
+        try:
+            resolved = await self.app.get_chat(f"@{username}")
+            self.log(
+                f"Preheated peer with {reason}: {chat.chat_id} -> @{username}",
+                level="WARNING",
+            )
+            chat.chat_id = resolved.id
+            return True
+        except Exception as e:
+            self.log(
+                f"Failed to preheat with {reason}: @{username}, error={type(e).__name__}: {e}",
+                level="WARNING",
+            )
+            return False
+
     @property
     def sign_record_file(self):
         sign_record_dir = self.task_dir / str(self.user.id)
@@ -1407,9 +1499,24 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         self,
         chat: SignChatV3,
     ):
+        cached_chat = (
+            self._find_cached_chat(chat.chat_id, chat.name)
+            if isinstance(chat.chat_id, int)
+            else None
+        )
+        cached_username = self._normalize_chat_username(
+            cached_chat.get("username") if cached_chat else None
+        )
         try:
             # 预热会话，确保 peer/access_hash 可用
-            await self.app.get_chat(chat.chat_id)
+            if cached_username and await self._preheat_chat_by_username(
+                chat,
+                cached_username,
+                "cached username before numeric lookup",
+            ):
+                pass
+            else:
+                await self.app.get_chat(chat.chat_id)
         except Exception as e:
             # 兼容历史配置：部分会话可能保存了缺失负号的 chat_id
             try:
@@ -1437,22 +1544,18 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                         last_error = e2
 
                 if not resolved_peer:
-                    cached = self._find_cached_chat(chat.chat_id, chat.name)
+                    cached = cached_chat or self._find_cached_chat(chat.chat_id, chat.name)
                     if cached:
-                        username = cached.get("username")
+                        username = self._normalize_chat_username(cached.get("username"))
                         cached_id = cached.get("id")
                         if username:
-                            try:
-                                resolved = await self.app.get_chat(username)
-                                self.log(
-                                    f"Preheated peer with cached username: {chat.chat_id} -> @{username}",
-                                    level="WARNING",
-                                )
-                                chat.chat_id = resolved.id
+                            if await self._preheat_chat_by_username(
+                                chat,
+                                username,
+                                "cached username",
+                            ):
                                 resolved_peer = True
                                 last_error = None
-                            except Exception as e2:
-                                last_error = e2
                         if (
                             not resolved_peer
                             and cached_id
