@@ -3264,7 +3264,12 @@ class SignTaskService:
                 raise ValueError(f"Task {task_name} does not exist or cannot be loaded")
             requires_updates = self._task_requires_updates(task_cfg)
             has_keyword_monitor = self._task_has_keyword_monitor(task_cfg)
-            signer_no_updates = not requires_updates
+            # Sign tasks can reliably observe bot replies by polling recent chat
+            # history. Keeping Pyrogram's update worker enabled for short-lived
+            # task runs has repeatedly caused BadMsgNotification/msg_seqno storms
+            # in this app, so default to no_updates and allow explicit opt-in only
+            # for debugging.
+            signer_no_updates = os.getenv("SIGN_TASK_USE_UPDATES", "0") != "1"
             task_notify_on_failure = bool(task_cfg.get("notify_on_failure", True))
 
             invalid_reason = await self._check_account_before_task(
@@ -3353,23 +3358,11 @@ class SignTaskService:
                             raise ValueError(f"账号 {account_name} 的 session_string 不存在")
                         use_in_memory = True
                     else:
-                        # File mode: prefer in-memory to avoid SQLite "database is locked"
-                        # Try to load session_string from .session_string file as fallback
-                        if requires_updates:
-                            # Tasks that wait for bot replies must share the same live
-                            # client opened during the preflight check. Starting a
-                            # second in-memory client from the same auth key can corrupt
-                            # Telegram msg_seqno and trigger BadMsgNotification storms.
-                            session_string = None
-                            use_in_memory = False
-                        else:
-                            session_string = load_session_string_file(
-                                session_dir, account_name
-                            )
-                            if session_string:
-                                use_in_memory = True
-                            else:
-                                use_in_memory = False
+                        # File mode: reuse the account-level file session client.
+                        # Creating a second in-memory client from the same auth key
+                        # can corrupt Telegram msg_seqno and trigger BadMsgNotification.
+                        session_string = None
+                        use_in_memory = False
 
                         if os.getenv("SIGN_TASK_FORCE_IN_MEMORY") == "0":
                             # Explicitly disabled in-memory mode
@@ -3377,7 +3370,7 @@ class SignTaskService:
                             use_in_memory = False
 
                     self._active_logs[task_key].append(
-                        f"消息更新监听: {'开启' if requires_updates else '关闭'}"
+                        f"消息更新监听: {'关闭（轮询最近消息）' if signer_no_updates else '开启'}"
                     )
                     if has_keyword_monitor:
                         self._active_logs[task_key].append(

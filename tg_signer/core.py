@@ -1741,7 +1741,9 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
 
         sign_record = self.load_sign_record()
         chat_ids = [c.chat_id for c in config.chats]
-        need_update_handlers = bool(getattr(config, "requires_updates", True))
+        need_update_handlers = bool(getattr(config, "requires_updates", True)) and not bool(
+            getattr(self.app, "_tg_signpulse_no_updates", False)
+        )
         message_handler_ref = None
         edited_handler_ref = None
 
@@ -2987,40 +2989,67 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                 )
                 return False
 
+            next_history_scan = 0.0
+            action_started_at = datetime.now(timezone.utc)
             while time.perf_counter() - start < timeout:
                 await asyncio.sleep(0.3)
                 messages_dict = self.context.chat_messages.get(chat.chat_id)
-                if not messages_dict:
-                    continue
-                messages = list(messages_dict.values())
-                # 暂无新消息
-                if messages[-1] == last_message:
-                    continue
-                last_message = messages[-1]
-                for message in messages:
-                    if message is None:
-                        continue
-                    self.context.waiting_message = message
-                    self._log_received_target_message(message)
-                    ok = False
-                    if isinstance(action, ClickKeyboardByTextAction):
-                        ok = await self._click_keyboard_by_text(
-                            action,
-                            message,
-                            message_thread_id=chat.message_thread_id,
-                        )
-                    elif isinstance(action, ReplyByCalculationProblemAction):
-                        ok = await self._reply_by_calculation_problem(action, message)
-                    elif isinstance(action, ChooseOptionByImageAction):
-                        ok = await self._choose_option_by_image(action, message)
-                    elif isinstance(action, ReplyByImageRecognitionAction):
-                        ok = await self._reply_by_image_recognition(action, message)
-                    elif isinstance(action, ClickButtonByCalculationProblemAction):
-                        ok = await self._click_button_by_calculation_problem(action, message)
-                    if ok:
-                        # 将消息ID对应value置为None，保证收到消息的编辑时消息所处的顺序
-                        self.context.chat_messages[chat.chat_id][message.id] = None
-                        return None
+                if messages_dict:
+                    messages = list(messages_dict.values())
+                    # 暂无新消息
+                    if messages[-1] != last_message:
+                        last_message = messages[-1]
+                        for message in messages:
+                            if message is None:
+                                continue
+                            if not self._message_is_after(message, action_started_at):
+                                continue
+                            self.context.waiting_message = message
+                            self._log_received_target_message(message)
+                            ok = False
+                            if isinstance(action, ClickKeyboardByTextAction):
+                                ok = await self._click_keyboard_by_text(
+                                    action,
+                                    message,
+                                    message_thread_id=chat.message_thread_id,
+                                )
+                            elif isinstance(action, ReplyByCalculationProblemAction):
+                                ok = await self._reply_by_calculation_problem(action, message)
+                            elif isinstance(action, ChooseOptionByImageAction):
+                                ok = await self._choose_option_by_image(action, message)
+                            elif isinstance(action, ReplyByImageRecognitionAction):
+                                ok = await self._reply_by_image_recognition(action, message)
+                            elif isinstance(action, ClickButtonByCalculationProblemAction):
+                                ok = await self._click_button_by_calculation_problem(action, message)
+                            if ok:
+                                # 将消息ID对应value置为None，保证收到消息的编辑时消息所处的顺序
+                                self.context.chat_messages[chat.chat_id][message.id] = None
+                                return None
+
+                now_ts = time.perf_counter()
+                if now_ts >= next_history_scan:
+                    next_history_scan = now_ts + 1.5
+                    try:
+                        async for message in self.app.get_chat_history(chat.chat_id, limit=history_limit):
+                            if not self._message_is_after(message, action_started_at):
+                                continue
+                            self._log_received_target_message(message)
+                            if isinstance(action, ReplyByCalculationProblemAction):
+                                ok = await self._reply_by_calculation_problem(action, message)
+                            elif isinstance(action, ChooseOptionByImageAction):
+                                ok = await self._choose_option_by_image(action, message)
+                            elif isinstance(action, ReplyByImageRecognitionAction):
+                                ok = await self._reply_by_image_recognition(action, message)
+                            elif isinstance(action, ClickButtonByCalculationProblemAction):
+                                ok = await self._click_button_by_calculation_problem(
+                                    action, message
+                                )
+                            else:
+                                ok = False
+                            if ok:
+                                return None
+                    except Exception as e:
+                        self.log(f"最近消息轮询失败: {e}", level="WARNING")
             # Fallback: try recent history in case message handlers missed the reply.
             if isinstance(
                 action,
@@ -3035,6 +3064,8 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                 try:
                     self.log("等待超时，尝试从最近消息回退处理当前步骤", level="WARNING")
                     async for message in self.app.get_chat_history(chat.chat_id, limit=history_limit):
+                        if not self._message_is_after(message, action_started_at):
+                            continue
                         self._log_received_target_message(message)
                         if isinstance(action, ClickKeyboardByTextAction):
                             ok = await self._click_keyboard_by_text(
