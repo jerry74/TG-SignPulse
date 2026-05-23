@@ -2118,6 +2118,19 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             self._reply_markup_marker(getattr(message, "reply_markup", None)),
         )
 
+    @staticmethod
+    def _message_is_after(message: Message, since: Optional[datetime]) -> bool:
+        if since is None:
+            return True
+        message_date = getattr(message, "date", None) or getattr(message, "edit_date", None)
+        if message_date is None:
+            return True
+        if message_date.tzinfo is None:
+            message_date = message_date.replace(tzinfo=timezone.utc)
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        return message_date >= since - timedelta(seconds=2)
+
     async def _chat_state_snapshot(
         self,
         chat: SignChatV3,
@@ -2269,6 +2282,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         *,
         history_limit: int,
         timeout: float,
+        since: Optional[datetime] = None,
     ) -> bool:
         deadline = time.perf_counter() + max(timeout, 0.5)
         while time.perf_counter() < deadline:
@@ -2288,6 +2302,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                 if (
                     self._message_matches_chat_thread(message, chat)
                     and getattr(message, "id", None) in changed_ids
+                    and self._message_is_after(message, since)
                     and self._message_supports_next_action(next_action, message)
                 ):
                     return True
@@ -2300,6 +2315,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                     if (
                         self._message_matches_chat_thread(message, chat)
                         and getattr(message, "id", None) in changed_ids
+                        and self._message_is_after(message, since)
                         and self._message_supports_next_action(next_action, message)
                     ):
                         return True
@@ -2438,6 +2454,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         *,
         history_limit: int,
         timeout: float,
+        since: Optional[datetime] = None,
     ) -> bool:
         deadline = time.perf_counter() + max(timeout, 0.5)
         while time.perf_counter() < deadline:
@@ -2457,6 +2474,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                 if (
                     self._message_matches_chat_thread(message, chat)
                     and getattr(message, "id", None) in changed_ids
+                    and self._message_is_after(message, since)
                     and self._message_has_terminal_success_text(message)
                 ):
                     self.context.stop_reason = self._summarize_target_message(message)
@@ -2471,6 +2489,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                     if (
                         self._message_matches_chat_thread(message, chat)
                         and getattr(message, "id", None) in changed_ids
+                        and self._message_is_after(message, since)
                         and self._message_has_terminal_success_text(message)
                     ):
                         self.context.stop_reason = self._summarize_target_message(message)
@@ -2489,6 +2508,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         before_click_state: dict[int, tuple],
         history_limit: int,
         timeout: float,
+        since: Optional[datetime] = None,
     ) -> str:
         callback_text = (self.context.last_callback_answer or "").strip()
         if self._callback_text_has_terminal_success_text(callback_text):
@@ -2504,6 +2524,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             before_click_state,
             history_limit=history_limit,
             timeout=timeout,
+            since=since,
         ):
             self.context.stop_after_current_action = True
             self.log(f"按钮「{action_text}」后已检测到任务完成响应，将跳过后续动作")
@@ -2515,6 +2536,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             before_click_state,
             history_limit=history_limit,
             timeout=timeout,
+            since=since,
         ):
             self.log(f"按钮「{action_text}」后已检测到下一步动作可执行，继续流程")
             return "next"
@@ -2803,6 +2825,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                         self.context.waiting_message = message
 
                         before_click_state: dict[int, tuple] = {}
+                        click_started_at = datetime.now(timezone.utc)
 
                         async def remember_before_click():
                             nonlocal before_click_state
@@ -2828,6 +2851,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                     before_click_state=before_click_state,
                                     history_limit=history_limit,
                                     timeout=follow_timeout,
+                                    since=click_started_at,
                                 )
                             self.context.chat_messages[chat.chat_id][message.id] = None
                             return True
@@ -2842,6 +2866,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                     before_click_state=before_click_state,
                                     history_limit=history_limit,
                                     timeout=follow_timeout,
+                                    since=click_started_at,
                                 )
                                 if followup_state in {"success", "next"}:
                                     return True
@@ -2855,6 +2880,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                 before_click_state,
                                 history_limit=history_limit,
                                 timeout=follow_timeout,
+                                since=click_started_at,
                             ):
                                 self.log(
                                     f"按钮「{action.text}」回调未确认，但已检测到成功回复，判定该步骤完成"
@@ -2885,6 +2911,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                 self._log_received_target_message(message)
 
                                 before_click_state: dict[int, tuple] = {}
+                                click_started_at = datetime.now(timezone.utc)
 
                                 async def remember_before_click():
                                     nonlocal before_click_state
@@ -2910,6 +2937,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                             before_click_state=before_click_state,
                                             history_limit=history_limit,
                                             timeout=follow_timeout,
+                                            since=click_started_at,
                                         )
                                     return True
                                 if matched:
@@ -2923,6 +2951,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                             before_click_state=before_click_state,
                                             history_limit=history_limit,
                                             timeout=follow_timeout,
+                                            since=click_started_at,
                                         )
                                         if followup_state in {"success", "next"}:
                                             return True
@@ -2936,6 +2965,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                         before_click_state,
                                         history_limit=history_limit,
                                         timeout=follow_timeout,
+                                        since=click_started_at,
                                     ):
                                         self.log(
                                             f"按钮「{action.text}」回调未确认，但已检测到成功回复，判定该步骤完成"
