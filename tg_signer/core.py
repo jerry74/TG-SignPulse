@@ -4,6 +4,7 @@ import logging
 import os
 import pathlib
 import random
+import re
 import sqlite3
 import time
 import unicodedata
@@ -2449,6 +2450,85 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         )
         return self._text_has_terminal_success_text(text)
 
+    @staticmethod
+    def _message_text_content(message: Message) -> str:
+        return "\n".join(
+            item
+            for item in [
+                getattr(message, "text", None),
+                getattr(message, "caption", None),
+            ]
+            if item
+        )
+
+    @staticmethod
+    def _action_prompt_requires_calculation(action: ActionT) -> bool:
+        prompt = str(getattr(action, "ai_prompt", "") or "").lower()
+        return any(
+            marker in prompt
+            for marker in (
+                "arithmetic",
+                "calculate",
+                "calculation",
+                "math",
+                "算术",
+                "算式",
+                "计算",
+                "計算",
+            )
+        )
+
+    def _message_looks_like_calculation_challenge(self, message: Message) -> bool:
+        text = self._message_text_content(message)
+        if not re.search(r"\d+\s*(?:\+|-|\*|/|x|X|×|÷)\s*\d+", text):
+            return False
+        button_texts = [text for _, _, text in self._collect_clickable_buttons(message)]
+        return any(re.fullmatch(r"\s*-?\d+(?:\.\d+)?\s*", button) for button in button_texts)
+
+    def _requires_final_success_confirmation(
+        self,
+        action: ActionT,
+        next_action: Optional[ActionT],
+    ) -> bool:
+        if next_action is not None:
+            return False
+        if os.getenv("SIGN_TASK_REQUIRE_FINAL_SUCCESS", "1") == "0":
+            return False
+        return isinstance(
+            action,
+            (
+                ClickKeyboardByTextAction,
+                ChooseOptionByImageAction,
+                ClickButtonByCalculationProblemAction,
+            ),
+        )
+
+    async def _confirm_final_success_after_action(
+        self,
+        chat: SignChatV3,
+        action: ActionT,
+        *,
+        since: datetime,
+        history_limit: int,
+    ) -> bool:
+        callback_text = (self.context.last_callback_answer or "").strip()
+        if self._callback_text_has_terminal_success_text(callback_text):
+            return True
+        timeout = _read_positive_float_env("SIGN_TASK_FINAL_SUCCESS_TIMEOUT", 8.0, 1.0)
+        if await self._wait_for_terminal_success(
+            chat,
+            {},
+            history_limit=history_limit,
+            timeout=timeout,
+            since=since,
+        ):
+            return True
+        self.log(
+            f"最终动作已点击但未检测到签到完成响应：{self._describe_action(action)}",
+            level="WARNING",
+        )
+        return False
+
     async def _wait_for_terminal_success(
         self,
         chat: SignChatV3,
@@ -2736,6 +2816,14 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             return False
         clickable_buttons = self._collect_clickable_buttons(message)
         if clickable_buttons:
+            if self._action_prompt_requires_calculation(
+                action
+            ) and not self._message_looks_like_calculation_challenge(message):
+                self.log(
+                    "当前图片不包含可识别的计算验证题，跳过本消息",
+                    level="WARNING",
+                )
+                return False
             self._log_received_target_message(message)
             self.log("AI 正在分析图片并匹配可点击按钮")
             image_buffer: BinaryIO = await self.app.download_media(
@@ -2855,6 +2943,16 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                     timeout=follow_timeout,
                                     since=click_started_at,
                                 )
+                            elif self._requires_final_success_confirmation(
+                                action,
+                                next_action,
+                            ) and not await self._confirm_final_success_after_action(
+                                chat,
+                                action,
+                                since=click_started_at,
+                                history_limit=history_limit,
+                            ):
+                                return False
                             self.context.chat_messages[chat.chat_id][message.id] = None
                             return True
                         if matched:
@@ -2941,6 +3039,16 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                             timeout=follow_timeout,
                                             since=click_started_at,
                                         )
+                                    elif self._requires_final_success_confirmation(
+                                        action,
+                                        next_action,
+                                    ) and not await self._confirm_final_success_after_action(
+                                        chat,
+                                        action,
+                                        since=click_started_at,
+                                        history_limit=history_limit,
+                                    ):
+                                        return False
                                     return True
                                 if matched:
                                     self.context.waiting_message = None
@@ -3022,6 +3130,16 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                             elif isinstance(action, ClickButtonByCalculationProblemAction):
                                 ok = await self._click_button_by_calculation_problem(action, message)
                             if ok:
+                                if self._requires_final_success_confirmation(
+                                    action,
+                                    next_action,
+                                ) and not await self._confirm_final_success_after_action(
+                                    chat,
+                                    action,
+                                    since=action_started_at,
+                                    history_limit=history_limit,
+                                ):
+                                    return False
                                 # 将消息ID对应value置为None，保证收到消息的编辑时消息所处的顺序
                                 self.context.chat_messages[chat.chat_id][message.id] = None
                                 return None
@@ -3047,6 +3165,16 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                             else:
                                 ok = False
                             if ok:
+                                if self._requires_final_success_confirmation(
+                                    action,
+                                    next_action,
+                                ) and not await self._confirm_final_success_after_action(
+                                    chat,
+                                    action,
+                                    since=action_started_at,
+                                    history_limit=history_limit,
+                                ):
+                                    return False
                                 return None
                     except Exception as e:
                         self.log(f"最近消息轮询失败: {e}", level="WARNING")
@@ -3084,6 +3212,16 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                 action, message
                             )
                         if ok:
+                            if self._requires_final_success_confirmation(
+                                action,
+                                next_action,
+                            ) and not await self._confirm_final_success_after_action(
+                                chat,
+                                action,
+                                since=action_started_at,
+                                history_limit=history_limit,
+                            ):
+                                return False
                             return None
                 except Exception as e:
                     self.log(f"历史消息回退失败: {e}", level="WARNING")
