@@ -1,0 +1,12 @@
+services:
+  ai-solver:
+    user: "1000:10"
+
+  app:
+    ports: !override
+      - "18080:8080"
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
