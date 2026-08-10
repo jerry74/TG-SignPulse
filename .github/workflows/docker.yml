@@ -23,7 +23,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements-dev-next.txt
-      - run: pytest --cov=signplus --cov-report=term-missing
+      - run: python -m pytest --cov=signplus --cov-report=term-missing
       - run: ruff check signplus tests_next
       - run: mypy signplus
       - run: pip-audit -r requirements-next.txt
