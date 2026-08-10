@@ -1,6 +1,8 @@
 param(
     [string]$ProjectId = 'ffa02fd2-7390-41b7-8326-b48601344cf8',
-    [string]$Image = 'ghcr.io/jerry74/tg-signplus:sha-86aae5ae823c'
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^ghcr\.io/jerry74/tg-signplus:sha-[0-9a-f]{12}$')]
+    [string]$Image
 )
 
 $ErrorActionPreference = 'Stop'
