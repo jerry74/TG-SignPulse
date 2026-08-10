@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "initial_messages": [
+    {"id": 10, "text": "签到成功", "buttons": []}
+  ],
+  "interactions": [
+    {
+      "operation": {"type": "send_text", "value": "/checkin"},
+      "emit": [
+        {"id": 11, "text": "请选择操作", "buttons": ["签到"]}
+      ]
+    },
+    {
+      "operation": {"type": "click_button", "value": "签到"},
+      "emit": [
+        {
+          "id": 12,
+          "caption": "3 * (2 + 1) = ?",
+          "buttons": ["8", "9", "10"]
+        }
+      ]
+    },
+    {
+      "operation": {"type": "click_button", "value": "9"},
+      "emit": [
+        {"id": 13, "text": "今日签到成功", "buttons": []}
+      ]
+    }
+  ]
+}

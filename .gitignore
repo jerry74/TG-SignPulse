@@ -155,4 +155,8 @@ bandit_report*.json
 ruff_errors.txt
 git_show_head*.txt
 test_*.py
+!tests_next/
+!tests_next/**
+tests_next/**/__pycache__/
+tests_next/**/*.pyc
 
