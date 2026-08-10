@@ -1,9 +1,8 @@
-name: Docker Image
+name: TG-SignPlus image
 
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -11,57 +10,63 @@ permissions:
   packages: write
 
 concurrency:
-  group: docker-${{ github.ref }}
+  group: tg-signplus-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-and-push:
+  validate:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev-next.txt
+      - run: pytest --cov=signplus --cov-report=term-missing
+      - run: ruff check signplus tests_next
+      - run: mypy signplus
+      - run: pip-audit -r requirements-next.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend-next/package-lock.json
+      - working-directory: frontend-next
+        run: npm ci
+      - working-directory: frontend-next
+        run: npm test
+      - working-directory: frontend-next
+        run: npm run typecheck
+      - working-directory: frontend-next
+        run: npm run build
+      - working-directory: frontend-next
+        run: npm audit --audit-level=high
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Compute image tags
-        id: vars
+  build-and-push:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - id: image
         shell: bash
         run: |
           owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          image="ghcr.io/${owner}/tg-signpulse"
-          short_sha="${GITHUB_SHA::12}"
-
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            {
-              echo "tags<<EOF"
-              echo "${image}:${GITHUB_REF_NAME}"
-              echo "${image}:latest"
-              echo "EOF"
-            } >> "${GITHUB_OUTPUT}"
-          else
-            safe_ref="$(echo "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' | sed 's#[^a-z0-9._-]#-#g')"
-            {
-              echo "tags<<EOF"
-              echo "${image}:test-${safe_ref}"
-              echo "${image}:test-${short_sha}"
-              echo "EOF"
-            } >> "${GITHUB_OUTPUT}"
-          fi
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+          echo "ref=ghcr.io/${owner}/tg-signplus:sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile.next
+          platforms: linux/amd64
           push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.vars.outputs.tags }}
-          no-cache: true
+          tags: ${{ steps.image.outputs.ref }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
           cache-to: type=gha,mode=max
