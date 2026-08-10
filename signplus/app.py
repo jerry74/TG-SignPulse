@@ -72,6 +72,10 @@ def create_app(
     telegram_login_manager: Any | None = None,
     saved_messages_probe: Callable[[str, str], Awaitable[object]] | None = None,
     failure_notifier: FailureNotifier | None = None,
+    telegram_preflight: Callable[
+        [str, TaskDefinition], Awaitable[dict[str, object]]
+    ]
+    | None = None,
 ) -> FastAPI:
     store = SignPlusStore(data_dir / "signplus.sqlite")
     store.migrate()
@@ -258,5 +262,20 @@ def create_app(
     @app.get("/api/v1/runs")
     def runs(_: str = Depends(current_user)) -> list[dict[str, object]]:
         return [run.__dict__ for run in store.list_runs()]
+
+    @app.post("/api/v1/tasks/{task_id}/preflight")
+    async def preflight_task(
+        task_id: str,
+        account_name: str = Query(...),
+        _: str = Depends(current_user),
+    ) -> dict[str, object]:
+        if telegram_preflight is None:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, detail="PREFLIGHT_DISABLED"
+            )
+        assignment = store.get_assignment(task_id, account_name)
+        if assignment is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="TASK_NOT_FOUND")
+        return await telegram_preflight(account_name, assignment.definition)
 
     return app

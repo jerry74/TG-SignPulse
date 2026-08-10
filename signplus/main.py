@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -14,13 +15,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .app import create_app
-from .checkin import CheckInEngine
+from .checkin import CheckInEngine, TaskDefinition
 from .crypto import SessionCipher
 from .notifier import FailureNotifier, NullFailureNotifier, TelegramBotFailureNotifier
 from .store import SignPlusStore
 from .telegram import (
     KurigramClientPool,
     KurigramLoginManager,
+    KurigramTelegramAdapter,
     LazyAccountTelegramAdapter,
     SavedMessagesProbe,
 )
@@ -84,6 +86,33 @@ def _engine(account_name: str) -> CheckInEngine:
     return CheckInEngine(LazyAccountTelegramAdapter(pool, account_name))
 
 
+async def _preflight(
+    account_name: str, task: TaskDefinition
+) -> dict[str, object]:
+    for pattern in (*task.success_patterns, *task.failure_patterns):
+        re.compile(pattern)
+    for step in task.steps:
+        if step.kind.value == "click_button" and step.match_mode == "regex":
+            re.compile(step.value)
+    client = await pool.client(account_name)
+    me = await client.get_me()
+    chat = await client.get_chat(task.chat_id)
+    latest = await KurigramTelegramAdapter(client).latest_message(
+        task.chat_id, task.thread_id
+    )
+    return {
+        "session_authorized": bool(getattr(me, "id", None)),
+        "chat_accessible": int(chat.id) == task.chat_id,
+        "thread_id": task.thread_id,
+        "latest_message_id": latest.id if latest else None,
+        "success_rule_count": len(task.success_patterns),
+        "failure_rule_count": len(task.failure_patterns),
+        "button_rule_count": sum(
+            step.kind.value == "click_button" for step in task.steps
+        ),
+    }
+
+
 def _failure_notifier() -> FailureNotifier:
     if os.getenv("ENABLE_FAILURE_NOTIFIER", "false").lower() != "true":
         return NullFailureNotifier()
@@ -102,6 +131,7 @@ app = create_app(
     telegram_login_manager=login_manager,
     saved_messages_probe=_probe,
     failure_notifier=_failure_notifier(),
+    telegram_preflight=_preflight,
 )
 store = app.state.store
 

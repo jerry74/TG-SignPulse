@@ -20,6 +20,12 @@ def test_admin_can_create_and_run_a_task_through_http(tmp_path: Path) -> None:
             ],
         }
     )
+    preflight_calls: list[str] = []
+
+    async def preflight(account_name: str, task: object) -> dict[str, object]:
+        preflight_calls.append(account_name)
+        return {"session_authorized": True, "chat_accessible": True}
+
     app = create_app(
         data_dir=tmp_path,
         master_key="test-master-key-that-is-long-enough-123456",
@@ -27,6 +33,7 @@ def test_admin_can_create_and_run_a_task_through_http(tmp_path: Path) -> None:
         bootstrap_password="correct-horse-battery-staple",
         engine_for_account=lambda _: CheckInEngine(telegram),
         initial_accounts={"primary": "test-placeholder"},
+        telegram_preflight=preflight,
     )
 
     with TestClient(app) as client:
@@ -63,3 +70,11 @@ def test_admin_can_create_and_run_a_task_through_http(tmp_path: Path) -> None:
         assert run.json()["state"] == "succeeded"
         assert run.json()["code"] == "SUCCESS_CONFIRMED"
         assert client.get("/api/v1/runs", headers=headers).json()[0]["state"] == "succeeded"
+        preflight_response = client.post(
+            "/api/v1/tasks/task-http/preflight?account_name=primary", headers=headers
+        )
+        assert preflight_response.json() == {
+            "session_authorized": True,
+            "chat_accessible": True,
+        }
+        assert preflight_calls == ["primary"]
