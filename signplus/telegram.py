@@ -53,7 +53,7 @@ class KurigramTelegramAdapter:
         self._poll_interval = poll_interval
 
     async def latest_message(
-        self, chat_id: int, thread_id: int | None = None
+        self, chat_id: int | str, thread_id: int | None = None
     ) -> TelegramMessage | None:
         messages = await self._history(chat_id, limit=10)
         for message in messages:
@@ -62,18 +62,18 @@ class KurigramTelegramAdapter:
         return None
 
     async def send_text(
-        self, chat_id: int, value: str, thread_id: int | None = None
+        self, chat_id: int | str, value: str, thread_id: int | None = None
     ) -> None:
         kwargs = {"message_thread_id": thread_id} if thread_id is not None else {}
         await self._call(self.client.send_message(chat_id, value, **kwargs))
 
     async def send_dice(
-        self, chat_id: int, value: str, thread_id: int | None = None
+        self, chat_id: int | str, value: str, thread_id: int | None = None
     ) -> None:
         kwargs = {"message_thread_id": thread_id} if thread_id is not None else {}
         await self._call(self.client.send_dice(chat_id, emoji=value, **kwargs))
 
-    async def click_button(self, chat_id: int, message_id: int, value: str) -> None:
+    async def click_button(self, chat_id: int | str, message_id: int, value: str) -> None:
         message = await self._call(self.client.get_messages(chat_id, message_id))
         markup = getattr(message, "reply_markup", None)
         rows = getattr(markup, "inline_keyboard", None) or getattr(
@@ -92,7 +92,7 @@ class KurigramTelegramAdapter:
 
     async def wait_for_message(
         self,
-        chat_id: int,
+        chat_id: int | str,
         after: TelegramMessage | None,
         timeout_seconds: float,
         thread_id: int | None = None,
@@ -110,7 +110,7 @@ class KurigramTelegramAdapter:
             await asyncio.sleep(self._poll_interval)
         raise TelegramTimeout("Telegram response timeout")
 
-    async def _history(self, chat_id: int, limit: int) -> list[Any]:
+    async def _history(self, chat_id: int | str, limit: int) -> list[Any]:
         try:
             return [message async for message in self.client.get_chat_history(chat_id, limit=limit)]
         except Exception as exc:  # noqa: BLE001 - external SDK exception taxonomy
@@ -233,25 +233,33 @@ class LazyAccountTelegramAdapter:
     async def _adapter(self) -> KurigramTelegramAdapter:
         return await self._pool.adapter(self._account_name)
 
-    async def latest_message(self, chat_id: int, thread_id: int | None = None):
+    async def latest_message(
+        self, chat_id: int | str, thread_id: int | None = None
+    ) -> TelegramMessage | None:
         return await (await self._adapter()).latest_message(chat_id, thread_id)
 
-    async def send_text(self, chat_id: int, value: str, thread_id: int | None = None):
+    async def send_text(
+        self, chat_id: int | str, value: str, thread_id: int | None = None
+    ) -> None:
         return await (await self._adapter()).send_text(chat_id, value, thread_id)
 
-    async def send_dice(self, chat_id: int, value: str, thread_id: int | None = None):
+    async def send_dice(
+        self, chat_id: int | str, value: str, thread_id: int | None = None
+    ) -> None:
         return await (await self._adapter()).send_dice(chat_id, value, thread_id)
 
-    async def click_button(self, chat_id: int, message_id: int, value: str):
+    async def click_button(
+        self, chat_id: int | str, message_id: int, value: str
+    ) -> None:
         return await (await self._adapter()).click_button(chat_id, message_id, value)
 
     async def wait_for_message(
         self,
-        chat_id: int,
+        chat_id: int | str,
         after: TelegramMessage | None,
         timeout_seconds: float,
         thread_id: int | None = None,
-    ):
+    ) -> TelegramMessage:
         return await (await self._adapter()).wait_for_message(
             chat_id, after, timeout_seconds, thread_id
         )

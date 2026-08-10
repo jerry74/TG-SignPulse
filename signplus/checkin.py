@@ -40,6 +40,11 @@ class TaskDefinition:
     success_patterns: tuple[str, ...]
     failure_patterns: tuple[str, ...]
     thread_id: int | None = None
+    chat_username: str | None = None
+
+    @property
+    def telegram_target(self) -> int | str:
+        return self.chat_username or self.chat_id
 
 
 @dataclass(frozen=True)
@@ -59,18 +64,18 @@ class RunResult:
 
 class TelegramPort(Protocol):
     async def latest_message(
-        self, chat_id: int, thread_id: int | None = None
+        self, chat_id: int | str, thread_id: int | None = None
     ) -> TelegramMessage | None: ...
 
-    async def send_text(self, chat_id: int, value: str, thread_id: int | None = None) -> None: ...
+    async def send_text(self, chat_id: int | str, value: str, thread_id: int | None = None) -> None: ...
 
-    async def send_dice(self, chat_id: int, value: str, thread_id: int | None = None) -> None: ...
+    async def send_dice(self, chat_id: int | str, value: str, thread_id: int | None = None) -> None: ...
 
-    async def click_button(self, chat_id: int, message_id: int, value: str) -> None: ...
+    async def click_button(self, chat_id: int | str, message_id: int, value: str) -> None: ...
 
     async def wait_for_message(
         self,
-        chat_id: int,
+        chat_id: int | str,
         after: TelegramMessage | None,
         timeout_seconds: float,
         thread_id: int | None = None,
@@ -88,7 +93,8 @@ class CheckInEngine:
 
     async def execute(self, command: RunCommand) -> RunResult:
         task = command.task
-        cursor = await self._telegram.latest_message(task.chat_id, task.thread_id)
+        target = task.telegram_target
+        cursor = await self._telegram.latest_message(target, task.thread_id)
         current: TelegramMessage | None = None
         events: list[dict[str, object]] = [
             {"type": "run_started", "run_id": command.run_id}
@@ -101,29 +107,31 @@ class CheckInEngine:
                     await self._retry_operation(
                         partial(
                             self._telegram.send_text,
-                            task.chat_id,
+                            target,
                             value,
                             task.thread_id,
                         ),
                         events,
                     )
                     events.append({"type": "text_sent"})
-                    current = await self._wait(task, cursor, step.timeout_seconds)
+                    current = await self._wait(task, target, cursor, step.timeout_seconds)
                 elif step.kind is StepKind.SEND_DICE:
                     value = step.value or "🎲"
                     await self._retry_operation(
                         partial(
                             self._telegram.send_dice,
-                            task.chat_id,
+                            target,
                             value,
                             task.thread_id,
                         ),
                         events,
                     )
                     events.append({"type": "dice_sent"})
-                    current = await self._wait(task, cursor, step.timeout_seconds)
+                    current = await self._wait(task, target, cursor, step.timeout_seconds)
                 elif step.kind is StepKind.CLICK_BUTTON:
-                    current = current or await self._wait(task, cursor, step.timeout_seconds)
+                    current = current or await self._wait(
+                        task, target, cursor, step.timeout_seconds
+                    )
                     button = self._find_button(current.buttons, step.value, step.match_mode)
                     if button is None:
                         return self._failure("BUTTON_NOT_FOUND", events)
@@ -131,16 +139,18 @@ class CheckInEngine:
                     await self._retry_operation(
                         partial(
                             self._telegram.click_button,
-                            task.chat_id,
+                            target,
                             message_id,
                             button,
                         ),
                         events,
                     )
                     events.append({"type": "button_clicked", "button": button})
-                    current = await self._wait(task, cursor, step.timeout_seconds)
+                    current = await self._wait(task, target, cursor, step.timeout_seconds)
                 elif step.kind is StepKind.SOLVE_CAPTION_ARITHMETIC:
-                    current = current or await self._wait(task, cursor, step.timeout_seconds)
+                    current = current or await self._wait(
+                        task, target, cursor, step.timeout_seconds
+                    )
                     try:
                         answer = self._solver.solve(current.caption, current.buttons)
                     except ChallengeError as exc:
@@ -157,7 +167,7 @@ class CheckInEngine:
                     await self._retry_operation(
                         partial(
                             self._telegram.click_button,
-                            task.chat_id,
+                            target,
                             message_id,
                             answer_button,
                         ),
@@ -172,7 +182,7 @@ class CheckInEngine:
                             "candidate_count": len(current.buttons),
                         }
                     )
-                    current = await self._wait(task, cursor, step.timeout_seconds)
+                    current = await self._wait(task, target, cursor, step.timeout_seconds)
 
                 if current is not None:
                     cursor = current
@@ -215,11 +225,12 @@ class CheckInEngine:
     async def _wait(
         self,
         task: TaskDefinition,
+        target: int | str,
         cursor: TelegramMessage | None,
         timeout_seconds: float,
     ) -> TelegramMessage:
         return await self._telegram.wait_for_message(
-            task.chat_id,
+            target,
             cursor,
             timeout_seconds,
             task.thread_id,

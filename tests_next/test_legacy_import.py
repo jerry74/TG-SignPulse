@@ -38,6 +38,12 @@ def test_legacy_import_is_dry_runnable_encrypted_and_idempotent(tmp_path: Path) 
         ),
         encoding="utf-8",
     )
+    (task_dir.parent / "chats_cache.json").write_text(
+        json.dumps(
+            [{"id": 10001, "title": "fixture", "username": "fixture_bot", "type": "bot"}]
+        ),
+        encoding="utf-8",
+    )
     store = SignPlusStore(tmp_path / "target" / "signplus.sqlite")
     store.migrate()
     cipher = SessionCipher("test-master-key-that-is-long-enough-123456")
@@ -69,3 +75,4 @@ def test_legacy_import_is_dry_runnable_encrypted_and_idempotent(tmp_path: Path) 
         "click_button",
         "solve_caption_arithmetic",
     ]
+    assert store.list_tasks()[0]["chat_username"] == "fixture_bot"

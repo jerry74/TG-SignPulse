@@ -53,6 +53,7 @@ class TaskBody(BaseModel):
     name: str
     account_names: list[str]
     chat_id: int
+    chat_username: str | None = None
     thread_id: int | None = None
     schedule: ScheduleBody
     steps: list[StepBody]
@@ -203,6 +204,7 @@ def create_app(
             definition=TaskDefinition(
                 name=body.name,
                 chat_id=body.chat_id,
+                chat_username=body.chat_username,
                 thread_id=body.thread_id,
                 steps=tuple(
                     Step(

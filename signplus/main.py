@@ -96,9 +96,9 @@ async def _preflight(
             re.compile(step.value)
     client = await pool.client(account_name)
     me = await client.get_me()
-    chat = await client.get_chat(task.chat_id)
+    chat = await client.get_chat(task.telegram_target)
     latest = await KurigramTelegramAdapter(client).latest_message(
-        task.chat_id, task.thread_id
+        task.telegram_target, task.thread_id
     )
     return {
         "session_authorized": bool(getattr(me, "id", None)),

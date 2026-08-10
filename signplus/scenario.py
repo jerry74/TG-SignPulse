@@ -55,7 +55,7 @@ class ScenarioTelegramAdapter:
         return cls(json.loads(path.read_text(encoding="utf-8")))
 
     async def latest_message(
-        self, chat_id: int, thread_id: int | None = None
+        self, chat_id: int | str, thread_id: int | None = None
     ) -> TelegramMessage | None:
         del chat_id
         eligible = (
@@ -65,21 +65,21 @@ class ScenarioTelegramAdapter:
         )
         return max(eligible, key=lambda message: message.id, default=None)
 
-    async def send_text(self, chat_id: int, value: str, thread_id: int | None = None) -> None:
+    async def send_text(self, chat_id: int | str, value: str, thread_id: int | None = None) -> None:
         del chat_id, thread_id
         self._consume("send_text", value)
 
-    async def send_dice(self, chat_id: int, value: str, thread_id: int | None = None) -> None:
+    async def send_dice(self, chat_id: int | str, value: str, thread_id: int | None = None) -> None:
         del chat_id, thread_id
         self._consume("send_dice", value)
 
-    async def click_button(self, chat_id: int, message_id: int, value: str) -> None:
+    async def click_button(self, chat_id: int | str, message_id: int, value: str) -> None:
         del chat_id, message_id
         self._consume("click_button", value)
 
     async def wait_for_message(
         self,
-        chat_id: int,
+        chat_id: int | str,
         after: TelegramMessage | None,
         timeout_seconds: float,
         thread_id: int | None = None,

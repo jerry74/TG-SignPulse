@@ -63,11 +63,10 @@ class LegacyImporter:
                 self._store.add_account(name, self._cipher.encrypt(session_string))
                 accounts_imported += 1
             for task_id, account_name, definition, schedule in prepared:
-                if self._store.task_exists(task_id):
-                    continue
                 if not self._store.account_exists(account_name):
                     unsupported.append(f"{account_name}/{definition.name}:SESSION_MISSING")
                     continue
+                existed = self._store.task_exists(task_id)
                 self._store.create_task(
                     task_id=task_id,
                     definition=definition,
@@ -75,7 +74,8 @@ class LegacyImporter:
                     account_names=(account_name,),
                     enabled=False,
                 )
-                tasks_imported += 1
+                if not existed:
+                    tasks_imported += 1
 
         return ImportReport(
             accounts_ready=len(sessions),
@@ -93,6 +93,10 @@ class LegacyImporter:
         if len(chats) != 1:
             raise ValueError("TASK_MUST_HAVE_ONE_CHAT")
         chat = chats[0]
+        chat_id = int(chat["chat_id"])
+        chat_username = self._chat_username(
+            path.parent.parent / "chats_cache.json", chat_id
+        )
         steps = tuple(self._convert_action(action) for action in chat.get("actions") or [])
         if not steps:
             raise ValueError("TASK_HAS_NO_STEPS")
@@ -103,7 +107,8 @@ class LegacyImporter:
         return (
             TaskDefinition(
                 name=task_name,
-                chat_id=int(chat["chat_id"]),
+                chat_id=chat_id,
+                chat_username=chat_username,
                 thread_id=chat.get("message_thread_id"),
                 steps=steps,
                 success_patterns=self._success,
@@ -111,6 +116,21 @@ class LegacyImporter:
             ),
             schedule,
         )
+
+    @staticmethod
+    def _chat_username(cache_path: Path, chat_id: int) -> str | None:
+        if not cache_path.is_file():
+            return None
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        if not isinstance(cache, list):
+            return None
+        matches = [
+            str(item.get("username") or "").strip()
+            for item in cache
+            if isinstance(item, dict) and int(item.get("id", 0)) == chat_id
+        ]
+        usernames = [value for value in matches if value]
+        return usernames[0] if len(usernames) == 1 else None
 
     @staticmethod
     def _convert_action(action: dict[str, Any]) -> Step:

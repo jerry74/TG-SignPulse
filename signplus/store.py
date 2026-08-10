@@ -64,6 +64,7 @@ class SignPlusStore:
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL UNIQUE,
                     chat_id INTEGER NOT NULL,
+                    chat_username TEXT,
                     thread_id INTEGER,
                     steps_json TEXT NOT NULL,
                     success_json TEXT NOT NULL,
@@ -113,6 +114,13 @@ class SignPlusStore:
                 PRAGMA user_version = 2;
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            if "chat_username" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN chat_username TEXT")
+            db.execute("PRAGMA user_version = 3")
 
     def add_account(self, name: str, encrypted_session: str, status: str = "active") -> None:
         with self._connect() as db:
@@ -196,12 +204,13 @@ class SignPlusStore:
         with self._connect() as db:
             db.execute(
                 """INSERT INTO tasks(
-                       id, name, chat_id, thread_id, steps_json,
+                       id, name, chat_id, chat_username, thread_id, steps_json,
                        success_json, failure_json, schedule_kind,
                        schedule_at, schedule_start, schedule_end, enabled
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                        name=excluded.name, chat_id=excluded.chat_id,
+                       chat_username=excluded.chat_username,
                        thread_id=excluded.thread_id, steps_json=excluded.steps_json,
                        success_json=excluded.success_json,
                        failure_json=excluded.failure_json,
@@ -214,6 +223,7 @@ class SignPlusStore:
                     task_id,
                     definition.name,
                     definition.chat_id,
+                    definition.chat_username,
                     definition.thread_id,
                     json.dumps(steps, ensure_ascii=False),
                     json.dumps(definition.success_patterns, ensure_ascii=False),
@@ -262,6 +272,7 @@ class SignPlusStore:
                 "id": row["id"],
                 "name": row["name"],
                 "chat_id": row["chat_id"],
+                "chat_username": row["chat_username"],
                 "thread_id": row["thread_id"],
                 "steps": json.loads(row["steps_json"]),
                 "success_patterns": json.loads(row["success_json"]),
@@ -434,6 +445,7 @@ class SignPlusStore:
                 steps=steps,
                 success_patterns=tuple(json.loads(row["success_json"])),
                 failure_patterns=tuple(json.loads(row["failure_json"])),
+                chat_username=row["chat_username"],
             ),
             schedule=StoredSchedule(
                 kind=row["schedule_kind"],
