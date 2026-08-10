@@ -435,3 +435,48 @@ async def test_dice_action_and_flood_wait_retry_are_recorded() -> None:
     assert telegram.operations == [("send_dice", "🎯")] * 2
     assert telegram.clock.monotonic() == 1
     assert any(event.get("reason") == "flood_wait" for event in result.events)
+
+
+@pytest.mark.asyncio
+async def test_recovery_can_click_the_existing_latest_message_without_resending() -> None:
+    telegram = ScenarioTelegramAdapter(
+        {
+            "version": 1,
+            "initial_messages": [
+                {"id": 10, "text": "choose", "buttons": ["✅ 簽到", "說明"]}
+            ],
+            "interactions": [
+                {
+                    "operation": {"type": "click_button", "value": "✅ 簽到"},
+                    "emit": [{
+                        "id": 11,
+                        "caption": "2 + 3 = ?",
+                        "buttons": ["4", "5", "6"],
+                    }],
+                },
+                {
+                    "operation": {"type": "click_button", "value": "5"},
+                    "emit": [{"id": 12, "text": "success"}],
+                },
+            ],
+        }
+    )
+    task = TaskDefinition(
+        "continue-existing",
+        1,
+        (
+            Step(StepKind.CLICK_BUTTON, "签到|簽到", match_mode="regex"),
+            Step(StepKind.SOLVE_CAPTION_ARITHMETIC),
+        ),
+        ("success",),
+        ("failed",),
+    )
+
+    result = await CheckInEngine(telegram).execute(RunCommand("r", "a", task))
+
+    assert result.code == "SUCCESS_CONFIRMED"
+    assert telegram.operations == [
+        ("click_button", "✅ 簽到"),
+        ("click_button", "5"),
+    ]
+    telegram.assert_complete()

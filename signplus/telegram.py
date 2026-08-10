@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .checkin import StepKind, TaskDefinition, matching_buttons
 from .crypto import SessionCipher
 from .scenario import (
     TelegramFloodWaitError,
@@ -45,6 +47,45 @@ class SavedMessagesProbe:
         if not deleted:
             raise RuntimeError("SAVED_MESSAGES_DELETE_FAILED")
         return SavedMessagesProbeResult(sent.id, read_back, deleted)
+
+
+class KurigramTaskPreflight:
+    def __init__(self, client_for_account: Callable[[str], Awaitable[Any]]) -> None:
+        self._client_for_account = client_for_account
+
+    async def inspect(
+        self, account_name: str, task: TaskDefinition
+    ) -> dict[str, object]:
+        for pattern in (*task.success_patterns, *task.failure_patterns):
+            re.compile(pattern)
+        for step in task.steps:
+            if step.kind is StepKind.CLICK_BUTTON and step.match_mode == "regex":
+                re.compile(step.value)
+        client = await self._client_for_account(account_name)
+        me = await client.get_me()
+        chat = await client.get_chat(task.telegram_target)
+        latest = await KurigramTelegramAdapter(client).latest_message(
+            task.telegram_target, task.thread_id
+        )
+        buttons = latest.buttons if latest else ()
+        button_steps = tuple(
+            step for step in task.steps if step.kind is StepKind.CLICK_BUTTON
+        )
+        match_counts = tuple(
+            len(matching_buttons(buttons, step.value, step.match_mode))
+            for step in button_steps
+        )
+        return {
+            "session_authorized": bool(getattr(me, "id", None)),
+            "chat_accessible": int(chat.id) == task.chat_id,
+            "thread_id": task.thread_id,
+            "latest_message_id": latest.id if latest else None,
+            "success_rule_count": len(task.success_patterns),
+            "failure_rule_count": len(task.failure_patterns),
+            "button_rule_count": len(button_steps),
+            "button_match_counts": match_counts,
+            "button_rules_ready": all(count == 1 for count in match_counts),
+        }
 
 
 class KurigramTelegramAdapter:

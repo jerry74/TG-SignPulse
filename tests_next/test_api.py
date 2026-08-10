@@ -8,6 +8,7 @@ from signplus.app import create_app
 from signplus.auth import TokenManager
 from signplus.checkin import CheckInEngine
 from signplus.scenario import ScenarioTelegramAdapter
+from signplus.telegram import KurigramTaskPreflight
 
 
 def test_admin_can_create_and_run_a_task_through_http(tmp_path: Path) -> None:
@@ -217,3 +218,93 @@ def test_phone_code_and_2fa_are_exposed_through_authenticated_http(
             headers=headers,
             json={"code": "12345"},
         ).status_code == 404
+
+
+def test_preflight_proves_each_button_rule_matches_latest_keyboard_once(
+    tmp_path: Path,
+) -> None:
+    button = type("Button", (), {"text": "✅ 簽到"})()
+    markup = type("Markup", (), {"inline_keyboard": [[button]]})()
+    message = type(
+        "Message",
+        (),
+        {
+            "id": 10,
+            "text": "choose",
+            "caption": "",
+            "reply_markup": markup,
+            "message_thread_id": None,
+        },
+    )()
+
+    class Client:
+        async def get_me(self):
+            return type("Me", (), {"id": 99})()
+
+        async def get_chat(self, target: int | str):
+            del target
+            return type("Chat", (), {"id": 10001})()
+
+        async def get_chat_history(self, target: int | str, limit: int):
+            del target, limit
+            yield message
+
+    async def client_for_account(account_name: str):
+        assert account_name == "primary"
+        return Client()
+
+    app = create_app(
+        data_dir=tmp_path,
+        master_key="test-master-key-that-is-long-enough-123456",
+        bootstrap_username="admin",
+        bootstrap_password="correct-horse-battery-staple",
+        engine_for_account=lambda _: CheckInEngine(
+            ScenarioTelegramAdapter(
+                {"version": 1, "initial_messages": [], "interactions": []}
+            )
+        ),
+        initial_accounts={"primary": "test-placeholder"},
+        telegram_preflight=KurigramTaskPreflight(client_for_account).inspect,
+    )
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"username": "admin", "password": "correct-horse-battery-staple"},
+        )
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        payload = {
+            "id": "preflight-task",
+            "name": "preflight-task",
+            "account_names": ["primary"],
+            "chat_id": 10001,
+            "schedule": {"kind": "fixed", "at": "08:00"},
+            "steps": [{
+                "kind": "click_button",
+                "value": "签到",
+                "match_mode": "exact",
+            }],
+            "success_patterns": ["success"],
+            "failure_patterns": ["failed"],
+            "enabled": False,
+        }
+        assert client.post(
+            "/api/v1/tasks", headers=headers, json=payload
+        ).status_code == 201
+        exact = client.post(
+            "/api/v1/tasks/preflight-task/preflight?account_name=primary",
+            headers=headers,
+        )
+        assert exact.json()["button_match_counts"] == [0]
+        assert exact.json()["button_rules_ready"] is False
+
+        payload["steps"][0]["value"] = "签到|簽到"
+        payload["steps"][0]["match_mode"] = "regex"
+        assert client.put(
+            "/api/v1/tasks/preflight-task", headers=headers, json=payload
+        ).status_code == 200
+        regex = client.post(
+            "/api/v1/tasks/preflight-task/preflight?account_name=primary",
+            headers=headers,
+        )
+        assert regex.json()["button_match_counts"] == [1]
+        assert regex.json()["button_rules_ready"] is True

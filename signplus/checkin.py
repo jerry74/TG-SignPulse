@@ -65,6 +65,16 @@ class RunResult:
     events: tuple[dict[str, object], ...]
 
 
+def matching_buttons(
+    buttons: tuple[str, ...], pattern: str, mode: str
+) -> tuple[str, ...]:
+    if mode == "exact":
+        return tuple(button for button in buttons if button == pattern)
+    if mode == "regex":
+        return tuple(button for button in buttons if re.search(pattern, button))
+    return ()
+
+
 class TelegramPort(Protocol):
     async def latest_message(
         self, chat_id: int | str, thread_id: int | None = None
@@ -154,9 +164,11 @@ class CheckInEngine:
                     events.append({"type": "dice_sent"})
                     current = await self._wait(task, target, cursor, step.timeout_seconds)
                 elif step.kind is StepKind.CLICK_BUTTON:
-                    current = current or await self._wait(
-                        task, target, cursor, step.timeout_seconds
-                    )
+                    current = current or cursor
+                    if current is None:
+                        current = await self._wait(
+                            task, target, cursor, step.timeout_seconds
+                        )
                     button = self._find_button(current.buttons, step.value, step.match_mode)
                     if button is None:
                         return self._failure("BUTTON_NOT_FOUND", events)
@@ -288,12 +300,7 @@ class CheckInEngine:
 
     @staticmethod
     def _find_button(buttons: tuple[str, ...], pattern: str, mode: str) -> str | None:
-        if mode == "exact":
-            matches = [button for button in buttons if button == pattern]
-        elif mode == "regex":
-            matches = [button for button in buttons if re.search(pattern, button)]
-        else:
-            return None
+        matches = matching_buttons(buttons, pattern, mode)
         return matches[0] if len(matches) == 1 else None
 
     @staticmethod
