@@ -46,3 +46,19 @@ export function toTaskPayload(draft: TaskDraft) {
     enabled: false,
   };
 }
+
+export function describeRunEvent(event: Record<string, unknown>): string {
+  switch (event.type) {
+    case "run_started": return "開始執行";
+    case "text_sent": return "已傳送文字";
+    case "dice_sent": return "已傳送骰子";
+    case "button_clicked": return `已點擊 ${String(event.button ?? "按鈕")}`;
+    case "challenge_solved":
+      return `算式 ${String(event.expression ?? "")} → ${String(event.selected ?? "")}`;
+    case "challenge_rejected":
+      return `算式未點擊（${String(event.error_code ?? "unknown")}）`;
+    case "retry":
+      return `重試 ${String(event.attempt ?? "?")}（${String(event.reason ?? "unknown")}）`;
+    default: return String(event.type ?? "未知事件");
+  }
+}

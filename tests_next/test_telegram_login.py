@@ -3,8 +3,9 @@ from pathlib import Path
 import pytest
 
 from signplus.crypto import SessionCipher
+from signplus.scenario import TelegramUnauthorizedError
 from signplus.store import SignPlusStore
-from signplus.telegram import KurigramLoginManager
+from signplus.telegram import KurigramClientPool, KurigramLoginManager
 
 
 class SessionPasswordNeeded(Exception):
@@ -53,3 +54,69 @@ async def test_phone_code_and_2fa_login_persists_only_encrypted_session(tmp_path
     encrypted = store.get_encrypted_session("primary")
     assert encrypted != "exported-session"
     assert cipher.decrypt(encrypted) == "exported-session"
+
+
+class Unauthorized(Exception):
+    pass
+
+
+class FakeUnauthorizedClient:
+    def __init__(self, **_: object) -> None:
+        pass
+
+    async def start(self) -> None:
+        raise Unauthorized()
+
+
+@pytest.mark.asyncio
+async def test_invalid_persisted_session_is_translated_to_unauthorized(
+    tmp_path: Path,
+) -> None:
+    store = SignPlusStore(tmp_path / "invalid-session.sqlite")
+    store.migrate()
+    cipher = SessionCipher("test-master-key-that-is-long-enough-123456")
+    store.add_account("primary", cipher.encrypt("invalid-session"))
+    pool = KurigramClientPool(
+        store=store,
+        cipher=cipher,
+        api_id=1,
+        api_hash="hash",
+        workdir=tmp_path,
+        client_factory=FakeUnauthorizedClient,
+    )
+
+    with pytest.raises(TelegramUnauthorizedError):
+        await pool.client("primary")
+
+
+class FakeReconnectClient:
+    def __init__(self, **_: object) -> None:
+        self.is_connected = False
+        self.starts = 0
+
+    async def start(self) -> None:
+        self.starts += 1
+        self.is_connected = True
+
+
+@pytest.mark.asyncio
+async def test_disconnected_cached_client_is_reconnected(tmp_path: Path) -> None:
+    store = SignPlusStore(tmp_path / "reconnect.sqlite")
+    store.migrate()
+    cipher = SessionCipher("test-master-key-that-is-long-enough-123456")
+    store.add_account("primary", cipher.encrypt("session"))
+    pool = KurigramClientPool(
+        store=store,
+        cipher=cipher,
+        api_id=1,
+        api_hash="hash",
+        workdir=tmp_path,
+        client_factory=FakeReconnectClient,
+    )
+    client = await pool.client("primary")
+    client.is_connected = False
+
+    reconnected = await pool.client("primary")
+
+    assert reconnected is client
+    assert client.starts == 2

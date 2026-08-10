@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from "vue";
 import { api, hasToken, setToken } from "./api";
-import { toTaskPayload, type TaskDraft } from "./task";
+import { describeRunEvent, toTaskPayload, type TaskDraft } from "./task";
 
 type View = "tasks" | "accounts" | "runs";
 const authenticated = ref(hasToken());
@@ -133,6 +133,6 @@ onMounted(refresh);
       </article>
     </section>
     <section v-else-if="view==='accounts'" class="grid"><article class="panel"><h2>登入 Telegram 帳號</h2><label>帳號名稱<input v-model="loginAccount" /></label><label>手機號碼<input v-model="loginPhone" type="tel" /></label><button v-if="!loginId" :disabled="busy" @click="startAccountLogin">傳送驗證碼</button><template v-else-if="loginStatus==='code_required'"><label>驗證碼<input v-model="loginCode" inputmode="numeric" /></label><button :disabled="busy" @click="submitLogin('code')">驗證</button></template><template v-else-if="loginStatus==='password_required'"><label>2FA 密碼<input v-model="loginPassword" type="password" /></label><button :disabled="busy" @click="submitLogin('password')">完成登入</button></template></article><article class="panel"><h2>帳號</h2><div v-for="account in accounts" :key="account.name" class="row"><div><strong>{{ account.name }}</strong><small>{{ account.status }}</small></div><button :disabled="busy" @click="probe(account.name)">Saved Messages 測試</button></div></article></section>
-    <section v-else class="panel"><h2>執行紀錄</h2><div v-for="run in runs" :key="run.id" class="row"><div><strong>{{ run.state }} · {{ run.code || 'pending' }}</strong><small>{{ run.account_name }} · {{ run.scheduled_for }} · {{ run.trigger }}</small></div></div></section>
+    <section v-else class="panel"><h2>執行紀錄</h2><div v-for="run in runs" :key="run.id" class="row run-row"><div><strong>{{ run.state }} · {{ run.code || 'pending' }}</strong><small>{{ run.account_name }} · {{ run.scheduled_for }} · {{ run.trigger }}</small><ol v-if="run.events?.length" class="events"><li v-for="(event,index) in run.events" :key="index">{{ describeRunEvent(event) }}</li></ol></div></div></section>
   </main>
 </template>

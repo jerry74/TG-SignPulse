@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toTaskPayload } from "./task";
+import { describeRunEvent, toTaskPayload } from "./task";
 
 describe("task payload", () => {
   it("keeps imported-style tasks disabled until canary", () => {
@@ -25,5 +25,12 @@ describe("task payload", () => {
       "click_button",
       "solve_caption_arithmetic",
     ]);
+  });
+
+  it("renders structured run events without dumping the raw object", () => {
+    expect(describeRunEvent({ type: "challenge_solved", expression: "1 + 1", selected: "2" }))
+      .toBe("算式 1 + 1 → 2");
+    expect(describeRunEvent({ type: "retry", reason: "flood_wait", attempt: 2 }))
+      .toBe("重試 2（flood_wait）");
   });
 });

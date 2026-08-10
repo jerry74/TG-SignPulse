@@ -192,6 +192,12 @@ class KurigramClientPool:
     async def client(self, account_name: str) -> Any:
         existing = self._clients.get(account_name)
         if existing is not None:
+            if getattr(existing, "is_connected", True) is False:
+                try:
+                    await existing.start()
+                except Exception as exc:  # noqa: BLE001 - SDK exception taxonomy
+                    self._clients.pop(account_name, None)
+                    KurigramTelegramAdapter._raise_translated(exc)
             return existing
         factory = self._client_factory
         if factory is None:
@@ -212,7 +218,10 @@ class KurigramClientPool:
             workdir=str(self._workdir),
             proxy=self._proxy,
         )
-        await client.start()
+        try:
+            await client.start()
+        except Exception as exc:  # noqa: BLE001 - SDK exception taxonomy
+            KurigramTelegramAdapter._raise_translated(exc)
         self._clients[account_name] = client
         return client
 

@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import ast
-import operator
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import cast
 
 
 class ChallengeError(ValueError):
@@ -20,14 +18,12 @@ class ChallengeAnswer:
 
 
 _OPERATORS = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-    ast.FloorDiv: operator.floordiv,
-    ast.Mod: operator.mod,
+    ast.Add: lambda left, right: left + right,
+    ast.Sub: lambda left, right: left - right,
+    ast.Mult: lambda left, right: left * right,
+    ast.Div: lambda left, right: left / right,
 }
-_EXPRESSION = re.compile(r"(?P<expr>[0-9\s()+\-*/%.]+)\s*=\s*\?")
+_EXPRESSION = re.compile(r"(?P<expr>[0-9\s()+\-*/.]+)\s*=\s*\?")
 
 
 class CaptionArithmeticSolver:
@@ -50,16 +46,15 @@ class CaptionArithmeticSolver:
             raise ChallengeError("CHALLENGE_EXPRESSION_TOO_LONG")
         try:
             node = ast.parse(expression, mode="eval")
-            result = self._walk(node)
-            return Decimal(str(result))
+            return self._walk(node)
         except (SyntaxError, ValueError, TypeError, ZeroDivisionError, InvalidOperation):
             raise ChallengeError("CHALLENGE_EXPRESSION_INVALID") from None
 
-    def _walk(self, node: ast.AST) -> int | float:
+    def _walk(self, node: ast.AST) -> Decimal:
         if isinstance(node, ast.Expression):
             return self._walk(node.body)
         if isinstance(node, ast.Constant) and type(node.value) in (int, float):
-            return cast(int | float, node.value)
+            return Decimal(str(node.value))
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
             value = self._walk(node.operand)
             return value if isinstance(node.op, ast.UAdd) else -value

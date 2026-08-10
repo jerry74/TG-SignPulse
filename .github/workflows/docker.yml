@@ -70,3 +70,14 @@ jobs:
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - run: docker pull "${{ steps.image.outputs.ref }}"
+      - name: Validate immutable compose configuration
+        env:
+          TG_SIGNPLUS_IMAGE: ${{ steps.image.outputs.ref }}
+          APP_MASTER_KEY: test-master-key-that-is-long-enough-123456
+          ADMIN_PASSWORD: smoke-admin-password
+          TG_API_ID: "12345"
+          TG_API_HASH: smoke-api-hash
+        run: docker compose -f compose.next.yml config --quiet
+      - name: Run container black-box tests
+        run: sudo bash tools/container_smoke.sh "${{ steps.image.outputs.ref }}"

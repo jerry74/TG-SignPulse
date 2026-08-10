@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from zoneinfo import ZoneInfo
@@ -8,7 +8,13 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from signplus.checkin import CheckInEngine, Step, StepKind, TaskDefinition
+from signplus.checkin import (
+    CheckInEngine,
+    RunResult,
+    Step,
+    StepKind,
+    TaskDefinition,
+)
 from signplus.scenario import ScenarioTelegramAdapter
 from signplus.scheduler import DailySchedule, RunCoordinator
 from signplus.store import SignPlusStore
@@ -214,3 +220,162 @@ def test_cross_midnight_random_time_invariant(day: date, random_value: float) ->
         start = now.replace(hour=23)
         assert run.occurrence_date == day.isoformat()
         assert start <= scheduled < start + timedelta(hours=2)
+
+
+@pytest.mark.asyncio
+async def test_final_failure_is_not_retried_but_manual_run_remains_available(
+    tmp_path: Path,
+) -> None:
+    store = SignPlusStore(tmp_path / "failure.sqlite")
+    store.migrate()
+    store.add_account("primary", "encrypted-placeholder")
+    store.create_task(
+        "task-failure",
+        TaskDefinition(
+            "failure", 1, (Step(StepKind.SEND_TEXT, "/checkin"),),
+            ("success",), ("failed",),
+        ),
+        DailySchedule.fixed("08:00"),
+        ("primary",),
+        True,
+    )
+    telegram = ScenarioTelegramAdapter(
+        {
+            "version": 1,
+            "initial_messages": [],
+            "interactions": [
+                {
+                    "operation": {"type": "send_text", "value": "/checkin"},
+                    "emit": [{"id": 1, "text": "ambiguous"}],
+                },
+                {
+                    "operation": {"type": "send_text", "value": "/checkin"},
+                    "emit": [{"id": 2, "text": "success"}],
+                },
+            ],
+        }
+    )
+    coordinator = RunCoordinator(store, lambda _: CheckInEngine(telegram))
+    now = datetime(2026, 8, 11, 9, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+
+    first = await coordinator.tick(now)
+    second = await coordinator.tick(now + timedelta(hours=1))
+    manual = await coordinator.run_now(
+        "task-failure", "primary", now + timedelta(hours=2)
+    )
+
+    assert (first.failed, second.dispatched) == (1, 0)
+    assert manual.trigger == "manual"
+    assert manual.state == "succeeded"
+    assert [run.trigger for run in store.list_runs()] == ["scheduled", "manual"]
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_run_marks_account_for_reauthentication(
+    tmp_path: Path,
+) -> None:
+    store = SignPlusStore(tmp_path / "unauthorized.sqlite")
+    store.migrate()
+    store.add_account("primary", "encrypted-placeholder")
+    store.create_task(
+        "task-unauthorized",
+        TaskDefinition(
+            "unauthorized", 1, (Step(StepKind.SEND_TEXT, "/checkin"),),
+            ("success",), ("failed",),
+        ),
+        DailySchedule.fixed("08:00"),
+        ("primary",),
+        True,
+    )
+    telegram = ScenarioTelegramAdapter(
+        {
+            "version": 1,
+            "initial_messages": [],
+            "interactions": [{
+                "operation": {"type": "send_text", "value": "/checkin"},
+                "fault": {"type": "unauthorized"},
+            }],
+        }
+    )
+
+    result = await RunCoordinator(
+        store, lambda _: CheckInEngine(telegram)
+    ).tick(datetime(2026, 8, 11, 9, 0, tzinfo=ZoneInfo("Asia/Taipei")))
+
+    assert result.failed == 1
+    assert store.list_accounts()[0]["status"] == "reauth_required"
+    assert store.list_runs()[0].code == "ACCOUNT_UNAUTHORIZED"
+
+
+@pytest.mark.asyncio
+async def test_global_default_dispatch_is_sequential_across_accounts(
+    tmp_path: Path,
+) -> None:
+    store = SignPlusStore(tmp_path / "sequential.sqlite")
+    store.migrate()
+    for account in ("first", "second"):
+        store.add_account(account, "encrypted-placeholder")
+    store.create_task(
+        "task-sequential",
+        TaskDefinition(
+            "sequential", 1, (Step(StepKind.SEND_TEXT, "/checkin"),),
+            ("success",), ("failed",),
+        ),
+        DailySchedule.fixed("08:00"),
+        ("first", "second"),
+        True,
+    )
+
+    class TrackingEngine:
+        active = 0
+        maximum = 0
+
+        async def execute(self, command: object) -> RunResult:
+            del command
+            self.active += 1
+            self.maximum = max(self.maximum, self.active)
+            await asyncio.sleep(0)
+            self.active -= 1
+            return RunResult(True, "SUCCESS_CONFIRMED", "ok", ())
+
+    engine = TrackingEngine()
+    result = await RunCoordinator(store, lambda _: engine).tick(
+        datetime(2026, 8, 11, 9, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+    )
+
+    assert result.succeeded == 2
+    assert engine.maximum == 1
+
+
+@given(day=st.dates(min_value=date(2024, 1, 1), max_value=date(2032, 12, 31)))
+@settings(max_examples=25, deadline=None)
+def test_fixed_schedule_stays_on_the_local_calendar_date(day: date) -> None:
+    with TemporaryDirectory() as directory:
+        store = SignPlusStore(Path(directory) / "fixed-property.sqlite")
+        store.migrate()
+        store.add_account("primary", "encrypted-placeholder")
+        store.create_task(
+            "fixed-property",
+            TaskDefinition(
+                "fixed", 1, (Step(StepKind.SEND_TEXT, "/x"),), ("ok",), ("no",)
+            ),
+            DailySchedule.fixed("23:59"),
+            ("primary",),
+            True,
+        )
+        now = datetime.combine(
+            day, time(hour=0, minute=1), ZoneInfo("Asia/Taipei")
+        )
+        asyncio.run(
+            RunCoordinator(
+                store,
+                lambda _: CheckInEngine(
+                    ScenarioTelegramAdapter(
+                        {"version": 1, "initial_messages": [], "interactions": []}
+                    )
+                ),
+            ).tick(now)
+        )
+        run = store.list_runs()[0]
+        assert run.occurrence_date == day.isoformat()
+        assert datetime.fromisoformat(run.scheduled_for).date() == day

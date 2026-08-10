@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
@@ -35,7 +36,7 @@ class TelegramLoginPasswordBody(BaseModel):
 
 
 class ScheduleBody(BaseModel):
-    kind: str
+    kind: Literal["fixed", "window"]
     at: str | None = None
     start: str | None = None
     end: str | None = None
@@ -44,20 +45,20 @@ class ScheduleBody(BaseModel):
 class StepBody(BaseModel):
     kind: StepKind
     value: str = ""
-    match_mode: str = "exact"
+    match_mode: Literal["exact", "regex"] = "exact"
     timeout_seconds: float = Field(30, ge=1, le=180)
 
 
 class TaskBody(BaseModel):
-    id: str
-    name: str
-    account_names: list[str]
+    id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=128)
+    account_names: list[str] = Field(min_length=1)
     chat_id: int
     chat_username: str | None = None
     thread_id: int | None = None
     schedule: ScheduleBody
-    steps: list[StepBody]
-    success_patterns: list[str]
+    steps: list[StepBody] = Field(min_length=1)
+    success_patterns: list[str] = Field(min_length=1)
     failure_patterns: list[str]
     enabled: bool = True
 
@@ -182,10 +183,23 @@ def create_app(
 
     @app.post("/api/v1/tasks", status_code=status.HTTP_201_CREATED)
     def create_task(body: TaskBody, _: str = Depends(current_user)) -> dict[str, object]:
-        if not body.success_patterns:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="SUCCESS_RULE_REQUIRED")
         if any(not store.account_exists(name) for name in body.account_names):
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="ACCOUNT_NOT_FOUND")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="ACCOUNT_NOT_FOUND")
+        regexes = [*body.success_patterns, *body.failure_patterns]
+        regexes.extend(
+            step.value
+            for step in body.steps
+            if step.kind is StepKind.CLICK_BUTTON and step.match_mode == "regex"
+        )
+        try:
+            if any(len(pattern) > 256 for pattern in regexes):
+                raise re.error("pattern too long")
+            for pattern in regexes:
+                re.compile(pattern)
+        except re.error:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, detail="RULE_REGEX_INVALID"
+            ) from None
         try:
             if body.schedule.kind == "fixed":
                 schedule = DailySchedule.fixed(body.schedule.at or "")
@@ -197,7 +211,7 @@ def create_app(
                 raise ValueError("unsupported schedule")
         except ValueError:
             raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY, detail="SCHEDULE_INVALID"
+                status.HTTP_422_UNPROCESSABLE_CONTENT, detail="SCHEDULE_INVALID"
             ) from None
         store.create_task(
             task_id=body.id,

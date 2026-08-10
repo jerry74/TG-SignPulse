@@ -29,6 +29,20 @@ class TelegramFloodWaitError(RuntimeError):
         self.seconds = seconds
 
 
+class VirtualClock:
+    def __init__(self) -> None:
+        self._seconds = 0.0
+
+    def monotonic(self) -> float:
+        return self._seconds
+
+    def advance(self, seconds: float) -> None:
+        self._seconds += max(0.0, seconds)
+
+    async def sleep(self, seconds: float) -> None:
+        self.advance(seconds)
+
+
 @dataclass(frozen=True)
 class TelegramMessage:
     id: int
@@ -49,6 +63,7 @@ class ScenarioTelegramAdapter:
         self._interactions = deque(scenario.get("interactions", []))
         self._pending: deque[tuple[float, TelegramMessage]] = deque()
         self.operations: list[tuple[str, str]] = []
+        self.clock = VirtualClock()
 
     @classmethod
     def from_path(cls, path: Path) -> ScenarioTelegramAdapter:
@@ -88,7 +103,9 @@ class ScenarioTelegramAdapter:
         while self._pending:
             delay_seconds, message = self._pending.popleft()
             if delay_seconds > timeout_seconds:
+                self.clock.advance(timeout_seconds)
                 raise TelegramTimeout("scenario message arrived after timeout")
+            self.clock.advance(delay_seconds)
             if thread_id is not None and message.thread_id != thread_id:
                 continue
             if after is None or message.id > after.id or (message.id == after.id and message != after):
@@ -112,12 +129,17 @@ class ScenarioTelegramAdapter:
         if actual != expected_operation:
             raise ScenarioMismatch(f"expected {expected_operation!r}, got {actual!r}")
         fault = interaction.get("fault") or {}
-        if fault.get("type") == "transient":
+        fault_type = fault.get("type")
+        if fault_type in {"transient", "disconnect"}:
             raise TelegramTransientError("scenario transient failure")
-        if fault.get("type") == "unauthorized":
+        if fault_type == "timeout":
+            raise TelegramTimeout("scenario operation timed out")
+        if fault_type == "unauthorized":
             raise TelegramUnauthorizedError("scenario unauthorized")
-        if fault.get("type") == "flood_wait":
+        if fault_type == "flood_wait":
             raise TelegramFloodWaitError(int(fault.get("seconds", 1)))
+        if fault_type:
+            raise ScenarioMismatch(f"unsupported fault type {fault_type!r}")
         self._pending.extend(
             (float(item.get("delay_seconds", 0)), self._message(item))
             for item in interaction.get("emit", [])

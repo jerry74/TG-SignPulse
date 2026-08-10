@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from .challenge import CaptionArithmeticSolver, ChallengeError
 from .scenario import (
@@ -82,25 +85,47 @@ class TelegramPort(Protocol):
     ) -> TelegramMessage: ...
 
 
+_T = TypeVar("_T")
+
+
+class Clock(Protocol):
+    def monotonic(self) -> float: ...
+
+    async def sleep(self, seconds: float) -> None: ...
+
+
+class SystemClock:
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    async def sleep(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
+
 class CheckInEngine:
     def __init__(
         self,
         telegram: TelegramPort,
         solver: CaptionArithmeticSolver | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self._telegram = telegram
         self._solver = solver or CaptionArithmeticSolver()
+        self._clock = clock or SystemClock()
 
     async def execute(self, command: RunCommand) -> RunResult:
         task = command.task
         target = task.telegram_target
-        cursor = await self._telegram.latest_message(target, task.thread_id)
-        current: TelegramMessage | None = None
         events: list[dict[str, object]] = [
             {"type": "run_started", "run_id": command.run_id}
         ]
 
         try:
+            cursor = await self._retry_operation(
+                partial(self._telegram.latest_message, target, task.thread_id),
+                events,
+            )
+            current: TelegramMessage | None = None
             for step in task.steps:
                 if step.kind is StepKind.SEND_TEXT:
                     value = step.value
@@ -151,17 +176,36 @@ class CheckInEngine:
                     current = current or await self._wait(
                         task, target, cursor, step.timeout_seconds
                     )
-                    try:
-                        answer = self._solver.solve(current.caption, current.buttons)
-                    except ChallengeError as exc:
-                        events.append(
-                            {
-                                "type": "challenge_rejected",
-                                "error_code": str(exc),
-                                "candidate_count": len(current.buttons),
-                            }
-                        )
-                        return self._failure(str(exc), events)
+                    deadline = self._clock.monotonic() + step.timeout_seconds
+                    while True:
+                        terminal = self._terminal_result(task, current, events)
+                        if terminal is not None:
+                            return terminal
+                        try:
+                            answer = self._solver.solve(current.caption, current.buttons)
+                            break
+                        except ChallengeError as exc:
+                            error_code = str(exc)
+                            if error_code not in {
+                                "CHALLENGE_EXPRESSION_NOT_FOUND",
+                                "CHALLENGE_ANSWER_NOT_UNIQUE",
+                            }:
+                                return self._challenge_failure(
+                                    error_code, current, events
+                                )
+                            remaining = deadline - self._clock.monotonic()
+                            if remaining <= 0:
+                                return self._challenge_failure(
+                                    error_code, current, events
+                                )
+                            try:
+                                current = await self._wait(
+                                    task, target, current, remaining
+                                )
+                            except TelegramTimeout:
+                                return self._challenge_failure(
+                                    error_code, current, events
+                                )
                     message_id = current.id
                     answer_button = answer.button
                     await self._retry_operation(
@@ -180,9 +224,14 @@ class CheckInEngine:
                             "value": answer.value,
                             "selected": answer.button,
                             "candidate_count": len(current.buttons),
+                            "candidate_summary": self._button_summary(
+                                current.buttons
+                            ),
                         }
                     )
-                    current = await self._wait(task, target, cursor, step.timeout_seconds)
+                    current = await self._wait(
+                        task, target, current, step.timeout_seconds
+                    )
 
                 if current is not None:
                     cursor = current
@@ -202,25 +251,26 @@ class CheckInEngine:
 
     async def _retry_operation(
         self,
-        operation: Callable[[], Awaitable[None]],
+        operation: Callable[[], Awaitable[_T]],
         events: list[dict[str, object]],
-    ) -> None:
+    ) -> _T:
         for attempt in range(1, 4):
             try:
-                await operation()
-                return
+                return await operation()
             except TelegramFloodWaitError as exc:
                 if exc.seconds > 120 or attempt == 3:
                     raise
                 events.append(
                     {"type": "retry", "reason": "flood_wait", "attempt": attempt}
                 )
+                await self._clock.sleep(exc.seconds)
             except TelegramTransientError:
                 if attempt == 3:
                     raise
                 events.append(
                     {"type": "retry", "reason": "transient", "attempt": attempt}
                 )
+        raise AssertionError("retry loop exhausted")
 
     async def _wait(
         self,
@@ -262,3 +312,28 @@ class CheckInEngine:
     @staticmethod
     def _failure(code: str, events: list[dict[str, object]]) -> RunResult:
         return RunResult(False, code, code.replace("_", " ").lower(), tuple(events))
+
+    @staticmethod
+    def _challenge_failure(
+        code: str,
+        message: TelegramMessage,
+        events: list[dict[str, object]],
+    ) -> RunResult:
+        events.append(
+            {
+                "type": "challenge_rejected",
+                "error_code": code,
+                "candidate_count": len(message.buttons),
+                "candidate_summary": CheckInEngine._button_summary(
+                    message.buttons
+                ),
+            }
+        )
+        return CheckInEngine._failure(code, events)
+
+    @staticmethod
+    def _button_summary(buttons: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(
+            hashlib.sha256(button.strip().encode("utf-8")).hexdigest()[:10]
+            for button in buttons
+        )

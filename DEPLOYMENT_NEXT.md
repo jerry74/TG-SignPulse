@@ -22,3 +22,21 @@
 正式 Bot 尚未執行時，停止新版，再於 NAS 原目錄執行
 `docker compose start ai-solver app`。若 canary 已執行，先停用新版任務與容器，等舊排程
 當日時間窗結束後才恢復 NAS，避免重複簽到。
+
+## 可重現驗證
+
+本機與 CI 必須依序執行：
+
+```bash
+python -m pytest --cov=signplus --cov-report=term-missing
+ruff check signplus tests_next
+mypy signplus
+npm --prefix frontend-next test
+npm --prefix frontend-next run typecheck
+npm --prefix frontend-next run build
+bash tools/container_smoke.sh ghcr.io/jerry74/tg-signplus:sha-<12>
+```
+
+容器黑箱腳本使用全新暫存資料目錄，驗證健康、Web、SQLite migration、非 root、
+唯讀根檔案系統、正常重啟、PID 1 強制中止後自動恢復、線上備份還原與日誌秘密掃描。
+腳本不建立帳號、不連線 Telegram，也不接觸正式 Bot。

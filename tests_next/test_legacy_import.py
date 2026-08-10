@@ -54,6 +54,11 @@ def test_legacy_import_is_dry_runnable_encrypted_and_idempotent(tmp_path: Path) 
         success_patterns=("check-in ok", "already checked in"),
         failure_patterns=("check-in failed",),
     )
+    source_before = {
+        path.relative_to(source): path.read_bytes()
+        for path in source.rglob("*")
+        if path.is_file()
+    }
 
     dry_run = importer.run(apply=False)
     assert dry_run.accounts_ready == 1
@@ -76,3 +81,50 @@ def test_legacy_import_is_dry_runnable_encrypted_and_idempotent(tmp_path: Path) 
         "solve_caption_arithmetic",
     ]
     assert store.list_tasks()[0]["chat_username"] == "fixture_bot"
+    assert {
+        path.relative_to(source): path.read_bytes()
+        for path in source.rglob("*")
+        if path.is_file()
+    } == source_before
+
+
+def test_legacy_import_reports_non_caption_ai_and_listener_actions(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "legacy"
+    session_dir = source / "sessions"
+    task_dir = source / ".signer" / "signs" / "primary" / "unsupported"
+    session_dir.mkdir(parents=True)
+    task_dir.mkdir(parents=True)
+    (session_dir / "primary.session_string").write_text("session", encoding="utf-8")
+    config = task_dir / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "execution_mode": "fixed",
+                "sign_at": "08:00",
+                "chats": [{
+                    "chat_id": 1,
+                    "actions": [{"action": 5, "text": "legacy listener"}],
+                }],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = SignPlusStore(tmp_path / "target" / "signplus.sqlite")
+    store.migrate()
+    report = LegacyImporter(
+        source=source,
+        store=store,
+        cipher=SessionCipher("test-master-key-that-is-long-enough-123456"),
+        success_patterns=("success",),
+        failure_patterns=("failure",),
+    ).run(apply=True)
+
+    assert report.tasks_ready == 0
+    assert report.tasks_imported == 0
+    assert report.unsupported == ("primary/unsupported:ACTION_5_UNSUPPORTED",)
+    assert store.list_tasks() == []
+    assert json.loads(config.read_text(encoding="utf-8"))["chats"][0]["actions"][0][
+        "action"
+    ] == 5

@@ -12,7 +12,12 @@ def test_overlong_caption_expression_is_rejected_before_evaluation() -> None:
 
 @pytest.mark.parametrize(
     ("expression", "button"),
-    [("1 + 2 * 3", "7"), ("(8 - 2) / 3", "2.0"), ("-4 + 1.5", "-2.5")],
+    [
+        ("1 + 2 * 3", "7"),
+        ("(8 - 2) / 3", "2.0"),
+        ("-4 + 1.5", "-2.5"),
+        ("0.1 + 0.2", "0.3"),
+    ],
 )
 def test_arithmetic_is_normalized_and_selects_one_exact_button(
     expression: str, button: str
@@ -28,6 +33,8 @@ def test_arithmetic_is_normalized_and_selects_one_exact_button(
         ("1 / 0 = ?", ("0",)),
         ("1 + 1 = ?", ("2", "2.0")),
         ("1 + 1 = ?", ("3",)),
+        ("5 // 2 = ?", ("2",)),
+        ("5 % 2 = ?", ("1",)),
     ],
 )
 def test_uncertain_or_unsafe_challenge_never_returns_a_button(
