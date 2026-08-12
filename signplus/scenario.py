@@ -50,6 +50,7 @@ class TelegramMessage:
     caption: str = ""
     buttons: tuple[str, ...] = ()
     thread_id: int | None = None
+    outgoing: bool = False
 
 
 class ScenarioTelegramAdapter:
@@ -76,7 +77,8 @@ class ScenarioTelegramAdapter:
         eligible = (
             message
             for message in self._initial
-            if thread_id is None or message.thread_id == thread_id
+            if not message.outgoing
+            and (thread_id is None or message.thread_id == thread_id)
         )
         return max(eligible, key=lambda message: message.id, default=None)
 
@@ -107,6 +109,8 @@ class ScenarioTelegramAdapter:
                 raise TelegramTimeout("scenario message arrived after timeout")
             self.clock.advance(delay_seconds)
             if thread_id is not None and message.thread_id != thread_id:
+                continue
+            if message.outgoing:
                 continue
             if after is None or message.id > after.id or (message.id == after.id and message != after):
                 return message
@@ -153,6 +157,7 @@ class ScenarioTelegramAdapter:
             caption=str(item.get("caption") or ""),
             buttons=tuple(str(value) for value in item.get("buttons", [])),
             thread_id=(int(item["thread_id"]) if item.get("thread_id") is not None else None),
+            outgoing=bool(item.get("outgoing", False)),
         )
 
     @staticmethod

@@ -14,6 +14,7 @@ from signplus.scenario import (
     TelegramTransientError,
     TelegramUnauthorizedError,
 )
+from signplus.telegram import KurigramTelegramAdapter
 
 
 class BaselineFaultAdapter:
@@ -480,3 +481,132 @@ async def test_recovery_can_click_the_existing_latest_message_without_resending(
         ("click_button", "5"),
     ]
     telegram.assert_complete()
+
+
+@pytest.mark.asyncio
+async def test_sent_command_is_not_mistaken_for_the_bot_reply() -> None:
+    telegram = ScenarioTelegramAdapter(
+        {
+            "version": 1,
+            "initial_messages": [{"id": 10, "text": "old bot message"}],
+            "interactions": [
+                {
+                    "operation": {"type": "send_text", "value": "/start"},
+                    "emit": [
+                        {"id": 11, "text": "/start", "outgoing": True},
+                        {
+                            "id": 12,
+                            "text": "menu",
+                            "buttons": ["check-in"],
+                            "delay_seconds": 3,
+                        },
+                    ],
+                },
+                {
+                    "operation": {"type": "click_button", "value": "check-in"},
+                    "emit": [{"id": 13, "text": "success"}],
+                },
+            ],
+        }
+    )
+    task = TaskDefinition(
+        "daily",
+        1,
+        (
+            Step(StepKind.SEND_TEXT, "/start"),
+            Step(StepKind.CLICK_BUTTON, "check-in"),
+        ),
+        ("success",),
+        ("failed",),
+    )
+
+    result = await CheckInEngine(telegram, clock=telegram.clock).execute(
+        RunCommand("repro", "account", task)
+    )
+
+    assert result.code == "SUCCESS_CONFIRMED"
+    assert telegram.operations == [
+        ("send_text", "/start"),
+        ("click_button", "check-in"),
+    ]
+    assert telegram.clock.monotonic() == 3
+
+
+@pytest.mark.asyncio
+async def test_kurigram_adapter_ignores_the_sent_command_echo() -> None:
+    class RawMessage:
+        def __init__(
+            self,
+            message_id: int,
+            text: str,
+            *,
+            outgoing: bool = False,
+            buttons: tuple[str, ...] = (),
+        ) -> None:
+            self.id = message_id
+            self.text = text
+            self.caption = ""
+            self.outgoing = outgoing
+            self.message_thread_id = None
+            self.clicked = False
+            if buttons:
+                rows = [[type("Button", (), {"text": value})() for value in buttons]]
+                self.reply_markup = type("Markup", (), {"inline_keyboard": rows})()
+            else:
+                self.reply_markup = None
+
+        async def click(self, column: int, row: int) -> None:
+            assert (column, row) == (0, 0)
+            self.clicked = True
+
+    class Client:
+        def __init__(self) -> None:
+            self.old = RawMessage(10, "old")
+            self.sent: RawMessage | None = None
+            self.menu: RawMessage | None = None
+            self.success: RawMessage | None = None
+            self.history_calls = 0
+
+        async def send_message(self, chat_id: int, value: str, **kwargs: object):
+            assert (chat_id, value, kwargs) == (1, "/start", {})
+            self.sent = RawMessage(11, "/start", outgoing=True)
+            return self.sent
+
+        async def get_chat_history(self, chat_id: int, limit: int):
+            assert chat_id == 1
+            del limit
+            self.history_calls += 1
+            if self.success is not None:
+                yield self.success
+            if self.history_calls >= 3 and self.menu is None:
+                self.menu = RawMessage(12, "menu", buttons=("check-in",))
+            if self.menu is not None:
+                yield self.menu
+            if self.sent is not None:
+                yield self.sent
+            yield self.old
+
+        async def get_messages(self, chat_id: int, message_id: int):
+            assert chat_id == 1 and self.menu is not None
+            assert message_id == self.menu.id
+            self.success = RawMessage(13, "success")
+            return self.menu
+
+    client = Client()
+    task = TaskDefinition(
+        "daily",
+        1,
+        (
+            Step(StepKind.SEND_TEXT, "/start"),
+            Step(StepKind.CLICK_BUTTON, "check-in"),
+        ),
+        ("success",),
+        ("failed",),
+    )
+
+    result = await CheckInEngine(
+        KurigramTelegramAdapter(client, poll_interval=0)
+    ).execute(RunCommand("real-adapter", "account", task))
+
+    assert result.code == "SUCCESS_CONFIRMED"
+    assert client.menu is not None and client.menu.clicked is True

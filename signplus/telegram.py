@@ -98,7 +98,9 @@ class KurigramTelegramAdapter:
     ) -> TelegramMessage | None:
         messages = await self._history(chat_id, limit=10)
         for message in messages:
-            if self._matches_thread(message, thread_id):
+            if not bool(getattr(message, "outgoing", False)) and self._matches_thread(
+                message, thread_id
+            ):
                 return self._convert(message)
         return None
 
@@ -141,6 +143,8 @@ class KurigramTelegramAdapter:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             for raw in await self._history(chat_id, limit=15):
+                if bool(getattr(raw, "outgoing", False)):
+                    continue
                 if not self._matches_thread(raw, thread_id):
                     continue
                 message = self._convert(raw)
@@ -202,6 +206,7 @@ class KurigramTelegramAdapter:
             text=str(getattr(message, "text", "") or ""),
             caption=str(getattr(message, "caption", "") or ""),
             buttons=buttons,
+            outgoing=bool(getattr(message, "outgoing", False)),
         )
 
 
