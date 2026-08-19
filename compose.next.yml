@@ -2,6 +2,7 @@ services:
   app:
     image: ${TG_SIGNPLUS_IMAGE:?TG_SIGNPLUS_IMAGE is required}
     container_name: tg-signplus
+    user: "10001:10001"
     restart: unless-stopped
     init: true
     ports:
@@ -17,6 +18,8 @@ services:
       ENABLE_FAILURE_NOTIFIER: "false"
       TZ: Asia/Taipei
       SCHEDULER_POLL_SECONDS: "15"
+      SCHEDULE_RETRY_DELAY_SECONDS: "300"
+      SCHEDULE_RETRY_MAX_ATTEMPTS: "3"
     volumes:
       - ./data:/data
     read_only: true

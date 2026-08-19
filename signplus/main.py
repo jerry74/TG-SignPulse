@@ -105,6 +105,12 @@ app = create_app(
     saved_messages_probe=_probe,
     failure_notifier=_failure_notifier(),
     telegram_preflight=task_preflight.inspect,
+    schedule_retry_delay_seconds=max(
+        60, int(os.getenv("SCHEDULE_RETRY_DELAY_SECONDS", "300"))
+    ),
+    schedule_retry_max_attempts=max(
+        1, int(os.getenv("SCHEDULE_RETRY_MAX_ATTEMPTS", "3"))
+    ),
 )
 store = app.state.store
 
@@ -132,7 +138,9 @@ async def _scheduler_loop() -> None:
 @app.on_event("startup")
 async def _startup() -> None:
     (data_dir / "runtime").mkdir(parents=True, exist_ok=True)
-    store.interrupt_running(datetime.now(ZoneInfo("Asia/Taipei")))
+    app.state.coordinator.recover_interrupted(
+        datetime.now(ZoneInfo("Asia/Taipei"))
+    )
     app.state.scheduler_task = asyncio.create_task(_scheduler_loop())
     app.state.ready = True
 

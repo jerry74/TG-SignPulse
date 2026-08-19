@@ -50,12 +50,20 @@ class RunCoordinator:
         random_source: RandomSource | None = None,
         failure_notifier: FailureNotifier | None = None,
         now_source: Callable[[], datetime] | None = None,
+        retry_delay: timedelta = timedelta(minutes=5),
+        max_attempts: int = 3,
     ) -> None:
+        if retry_delay.total_seconds() < 0:
+            raise ValueError("retry_delay must not be negative")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least one")
         self._store = store
         self._engine_for_account = engine_for_account
         self._random = random_source or Random()
         self._notifier = failure_notifier or NullFailureNotifier()
         self._now_source = now_source
+        self._retry_delay = retry_delay
+        self._max_attempts = max_attempts
 
     async def tick(self, now: datetime) -> DispatchResult:
         if now.tzinfo is None:
@@ -65,13 +73,25 @@ class RunCoordinator:
             occurrence_date, scheduled_for = _scheduled_occurrence(
                 assignment.schedule, now, self._random
             )
-            run = self._store.ensure_scheduled_run(
+            self._store.expire_retries_before(
+                assignment.task_id,
+                assignment.account_name,
+                occurrence_date.isoformat(),
+                now,
+            )
+            self._store.ensure_scheduled_run(
                 assignment.task_id,
                 assignment.account_name,
                 occurrence_date.isoformat(),
                 scheduled_for,
             )
-            if datetime.fromisoformat(run.scheduled_for) > now:
+            run = self._store.get_due_automatic_run(
+                assignment.task_id,
+                assignment.account_name,
+                occurrence_date.isoformat(),
+                now,
+            )
+            if run is None:
                 continue
             if not self._store.claim_run(run.id, now):
                 continue
@@ -83,18 +103,31 @@ class RunCoordinator:
                     task=assignment.definition,
                 )
             )
-            self._store.finish_run(run.id, result, self._finished_at(now))
+            finished_at = self._finished_at(now)
+            retry_at = (
+                finished_at + self._retry_delay
+                if self._is_retryable(result)
+                else None
+            )
+            retry_scheduled = self._store.finish_run(
+                run.id,
+                result,
+                finished_at,
+                retry_at=retry_at,
+                max_attempts=self._max_attempts,
+            )
             if result.code == "ACCOUNT_UNAUTHORIZED":
                 self._store.set_account_status(assignment.account_name, "reauth_required")
             if result.success:
                 succeeded += 1
             else:
                 failed += 1
-                await self._notify_failure(
-                    task_name=assignment.definition.name,
-                    account_name=assignment.account_name,
-                    result=result,
-                )
+                if not retry_scheduled:
+                    await self._notify_failure(
+                        task_name=assignment.definition.name,
+                        account_name=assignment.account_name,
+                        result=result,
+                    )
         return DispatchResult(dispatched, succeeded, failed)
 
     async def run_now(self, task_id: str, account_name: str, now: datetime) -> object:
@@ -125,6 +158,22 @@ class RunCoordinator:
                 raise ValueError("now_source must return a timezone-aware datetime")
             return value
         return datetime.now(started_at.tzinfo)
+
+    def recover_interrupted(self, now: datetime) -> int:
+        if now.tzinfo is None:
+            raise ValueError("recovery requires a timezone-aware datetime")
+        return self._store.interrupt_running(
+            now,
+            retry_at=now + self._retry_delay,
+            max_attempts=self._max_attempts,
+        )
+
+    @staticmethod
+    def _is_retryable(result: RunResult) -> bool:
+        return not result.success and result.code not in {
+            "ACCOUNT_UNAUTHORIZED",
+            "FAILURE_CONFIRMED",
+        }
 
     async def _notify_failure(
         self, *, task_name: str, account_name: str, result: RunResult

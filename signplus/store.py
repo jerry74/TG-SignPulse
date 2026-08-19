@@ -43,6 +43,8 @@ class StoredRun:
     events: tuple[dict[str, object], ...]
     started_at: str | None
     finished_at: str | None
+    parent_run_id: str | None
+    attempt_number: int
 
 
 class SignPlusStore:
@@ -95,7 +97,9 @@ class SignPlusStore:
                     message TEXT,
                     events_json TEXT NOT NULL DEFAULT '[]',
                     started_at TEXT,
-                    finished_at TEXT
+                    finished_at TEXT,
+                    parent_run_id TEXT,
+                    attempt_number INTEGER NOT NULL DEFAULT 1
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_scheduled_occurrence
                 ON runs(task_id, account_name, occurrence_date)
@@ -122,7 +126,22 @@ class SignPlusStore:
             }
             if "chat_username" not in columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN chat_username TEXT")
-            db.execute("PRAGMA user_version = 3")
+            run_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(runs)").fetchall()
+            }
+            if "parent_run_id" not in run_columns:
+                db.execute("ALTER TABLE runs ADD COLUMN parent_run_id TEXT")
+            if "attempt_number" not in run_columns:
+                db.execute(
+                    "ALTER TABLE runs ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 1"
+                )
+            db.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS uq_retry_attempt
+                   ON runs(parent_run_id, attempt_number)
+                   WHERE trigger='retry'"""
+            )
+            db.execute("PRAGMA user_version = 4")
 
     def add_account(self, name: str, encrypted_session: str, status: str = "active") -> None:
         with self._connect() as db:
@@ -320,6 +339,42 @@ class SignPlusStore:
             ).fetchone()
         return self._run(row)
 
+    def get_due_automatic_run(
+        self,
+        task_id: str,
+        account_name: str,
+        occurrence_date: str,
+        now: datetime,
+    ) -> StoredRun | None:
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT * FROM runs
+                   WHERE task_id=? AND account_name=? AND occurrence_date=?
+                     AND trigger IN ('scheduled', 'retry')
+                     AND state='pending' AND scheduled_for<=?
+                   ORDER BY scheduled_for, attempt_number, id LIMIT 1""",
+                (task_id, account_name, occurrence_date, now.isoformat()),
+            ).fetchone()
+        return self._run(row) if row else None
+
+    def expire_retries_before(
+        self,
+        task_id: str,
+        account_name: str,
+        occurrence_date: str,
+        now: datetime,
+    ) -> int:
+        with self._connect() as db:
+            result = db.execute(
+                """UPDATE runs
+                   SET state='expired', code='RETRY_EXPIRED',
+                       message='retry expired at occurrence boundary', finished_at=?
+                   WHERE task_id=? AND account_name=? AND trigger='retry'
+                     AND state='pending' AND occurrence_date<?""",
+                (now.isoformat(), task_id, account_name, occurrence_date),
+            )
+        return result.rowcount
+
     def create_manual_run(
         self, task_id: str, account_name: str, scheduled_for: datetime
     ) -> StoredRun:
@@ -365,8 +420,51 @@ class SignPlusStore:
             )
         return result.rowcount == 1
 
-    def finish_run(self, run_id: str, result: RunResult, now: datetime) -> None:
+    def finish_run(
+        self,
+        run_id: str,
+        result: RunResult,
+        now: datetime,
+        *,
+        retry_at: datetime | None = None,
+        max_attempts: int = 1,
+    ) -> bool:
+        events = list(result.events)
+        retry_scheduled = False
         with self._connect() as db:
+            if retry_at is not None:
+                source = db.execute(
+                    "SELECT * FROM runs WHERE id=?", (run_id,)
+                ).fetchone()
+                if source is not None:
+                    next_attempt = int(source["attempt_number"]) + 1
+                    if next_attempt <= max_attempts:
+                        root_id = str(source["parent_run_id"] or source["id"])
+                        inserted = db.execute(
+                            """INSERT OR IGNORE INTO runs(
+                                   id, task_id, account_name, occurrence_date,
+                                   scheduled_for, trigger, state,
+                                   parent_run_id, attempt_number
+                               ) VALUES (?, ?, ?, ?, ?, 'retry', 'pending', ?, ?)""",
+                            (
+                                str(uuid.uuid4()),
+                                source["task_id"],
+                                source["account_name"],
+                                source["occurrence_date"],
+                                retry_at.isoformat(),
+                                root_id,
+                                next_attempt,
+                            ),
+                        )
+                        retry_scheduled = inserted.rowcount == 1
+                        if retry_scheduled:
+                            events.append(
+                                {
+                                    "type": "retry_scheduled",
+                                    "attempt_number": next_attempt,
+                                    "scheduled_for": retry_at.isoformat(),
+                                }
+                            )
             db.execute(
                 """UPDATE runs SET state=?, code=?, message=?, events_json=?, finished_at=?
                    WHERE id=?""",
@@ -374,7 +472,7 @@ class SignPlusStore:
                     "succeeded" if result.success else "failed",
                     result.code,
                     result.message,
-                    json.dumps(result.events, ensure_ascii=False),
+                    json.dumps(events, ensure_ascii=False),
                     now.isoformat(),
                     run_id,
                 ),
@@ -384,18 +482,70 @@ class SignPlusStore:
                 "INSERT INTO run_events(run_id, sequence, event_json) VALUES (?, ?, ?)",
                 (
                     (run_id, sequence, json.dumps(event, ensure_ascii=False))
-                    for sequence, event in enumerate(result.events, start=1)
+                    for sequence, event in enumerate(events, start=1)
                 ),
             )
+        return retry_scheduled
 
-    def interrupt_running(self, now: datetime) -> int:
+    def interrupt_running(
+        self,
+        now: datetime,
+        *,
+        retry_at: datetime | None = None,
+        max_attempts: int = 1,
+    ) -> int:
         with self._connect() as db:
-            result = db.execute(
-                """UPDATE runs SET state='interrupted', code='PROCESS_INTERRUPTED',
-                   finished_at=? WHERE state='running'""",
-                (now.isoformat(),),
-            )
-        return result.rowcount
+            rows = db.execute("SELECT * FROM runs WHERE state='running'").fetchall()
+            for row in rows:
+                events: list[dict[str, object]] = [
+                    {"type": "process_interrupted"}
+                ]
+                if (
+                    retry_at is not None
+                    and row["trigger"] in {"scheduled", "retry"}
+                    and int(row["attempt_number"]) < max_attempts
+                ):
+                    next_attempt = int(row["attempt_number"]) + 1
+                    root_id = str(row["parent_run_id"] or row["id"])
+                    inserted = db.execute(
+                        """INSERT OR IGNORE INTO runs(
+                               id, task_id, account_name, occurrence_date,
+                               scheduled_for, trigger, state,
+                               parent_run_id, attempt_number
+                           ) VALUES (?, ?, ?, ?, ?, 'retry', 'pending', ?, ?)""",
+                        (
+                            str(uuid.uuid4()),
+                            row["task_id"],
+                            row["account_name"],
+                            row["occurrence_date"],
+                            retry_at.isoformat(),
+                            root_id,
+                            next_attempt,
+                        ),
+                    )
+                    if inserted.rowcount == 1:
+                        events.append(
+                            {
+                                "type": "retry_scheduled",
+                                "attempt_number": next_attempt,
+                                "scheduled_for": retry_at.isoformat(),
+                            }
+                        )
+                db.execute(
+                    """UPDATE runs SET state='interrupted', code='PROCESS_INTERRUPTED',
+                       message='process interrupted', events_json=?, finished_at=?
+                       WHERE id=?""",
+                    (json.dumps(events), now.isoformat(), row["id"]),
+                )
+                db.execute("DELETE FROM run_events WHERE run_id=?", (row["id"],))
+                db.executemany(
+                    "INSERT INTO run_events(run_id, sequence, event_json) VALUES (?, ?, ?)",
+                    (
+                        (row["id"], index, json.dumps(event))
+                        for index, event in enumerate(events, start=1)
+                    ),
+                )
+        return len(rows)
 
     def list_runs(self) -> list[StoredRun]:
         with self._connect() as db:
@@ -474,4 +624,6 @@ class SignPlusStore:
             events=events,
             started_at=row["started_at"],
             finished_at=row["finished_at"],
+            parent_run_id=row["parent_run_id"],
+            attempt_number=int(row["attempt_number"]),
         )

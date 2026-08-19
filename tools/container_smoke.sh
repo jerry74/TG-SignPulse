@@ -31,6 +31,8 @@ wait_healthy() {
 
 docker run -d \
   --name "${container}" \
+  --user 10001:10001 \
+  --init \
   --restart unless-stopped \
   --read-only \
   --tmpfs /tmp \
@@ -59,7 +61,7 @@ if docker exec "${container}" touch /rootfs-write-test >/dev/null 2>&1; then
   echo "read-only root filesystem check failed" >&2
   exit 1
 fi
-test "$(docker exec "${container}" python -c "import sqlite3; print(sqlite3.connect('/data/signplus.sqlite').execute('pragma user_version').fetchone()[0])")" = "3"
+test "$(docker exec "${container}" python -c "import sqlite3; print(sqlite3.connect('/data/signplus.sqlite').execute('pragma user_version').fetchone()[0])")" = "4"
 
 echo "smoke: online backup and isolated restore"
 docker exec "${container}" python -c "import sqlite3; source=sqlite3.connect('/data/signplus.sqlite'); target=sqlite3.connect('/data/smoke-backup.sqlite'); source.backup(target); target.close(); source.close()"

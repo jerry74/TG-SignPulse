@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -78,6 +78,8 @@ def create_app(
         [str, TaskDefinition], Awaitable[dict[str, object]]
     ]
     | None = None,
+    schedule_retry_delay_seconds: int = 300,
+    schedule_retry_max_attempts: int = 3,
 ) -> FastAPI:
     store = SignPlusStore(data_dir / "signplus.sqlite")
     store.migrate()
@@ -86,7 +88,11 @@ def create_app(
         store.add_account(name, encrypted_session)
     tokens = TokenManager(master_key)
     coordinator = RunCoordinator(
-        store, engine_for_account, failure_notifier=failure_notifier
+        store,
+        engine_for_account,
+        failure_notifier=failure_notifier,
+        retry_delay=timedelta(seconds=schedule_retry_delay_seconds),
+        max_attempts=schedule_retry_max_attempts,
     )
     app = FastAPI(title="TG-SignPlus", version="3.0.0")
     app.state.ready = True
