@@ -53,6 +53,12 @@ class TelegramMessage:
     outgoing: bool = False
 
 
+@dataclass(frozen=True)
+class TelegramCallbackAnswer:
+    text: str = ""
+    show_alert: bool = False
+
+
 class ScenarioTelegramAdapter:
     """Deterministic Telegram adapter used only by tests and the test CLI."""
 
@@ -90,9 +96,16 @@ class ScenarioTelegramAdapter:
         del chat_id, thread_id
         self._consume("send_dice", value)
 
-    async def click_button(self, chat_id: int | str, message_id: int, value: str) -> None:
+    async def click_button(
+        self, chat_id: int | str, message_id: int, value: str
+    ) -> TelegramCallbackAnswer:
         del chat_id, message_id
-        self._consume("click_button", value)
+        interaction = self._consume("click_button", value)
+        callback = interaction.get("callback") or {}
+        return TelegramCallbackAnswer(
+            text=str(callback.get("text") or ""),
+            show_alert=bool(callback.get("show_alert", False)),
+        )
 
     async def wait_for_message(
         self,
@@ -122,7 +135,7 @@ class ScenarioTelegramAdapter:
         if self._pending:
             raise ScenarioMismatch(f"{len(self._pending)} emitted message(s) were not consumed")
 
-    def _consume(self, kind: str, value: str) -> None:
+    def _consume(self, kind: str, value: str) -> dict[str, Any]:
         actual = (kind, value)
         self.operations.append(actual)
         if not self._interactions:
@@ -148,6 +161,7 @@ class ScenarioTelegramAdapter:
             (float(item.get("delay_seconds", 0)), self._message(item))
             for item in interaction.get("emit", [])
         )
+        return interaction
 
     @staticmethod
     def _message(item: dict[str, Any]) -> TelegramMessage:

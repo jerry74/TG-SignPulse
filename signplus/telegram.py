@@ -13,6 +13,7 @@ from typing import Any
 from .checkin import StepKind, TaskDefinition, matching_buttons
 from .crypto import SessionCipher
 from .scenario import (
+    TelegramCallbackAnswer,
     TelegramFloodWaitError,
     TelegramMessage,
     TelegramTimeout,
@@ -116,7 +117,9 @@ class KurigramTelegramAdapter:
         kwargs = {"message_thread_id": thread_id} if thread_id is not None else {}
         await self._call(self.client.send_dice(chat_id, emoji=value, **kwargs))
 
-    async def click_button(self, chat_id: int | str, message_id: int, value: str) -> None:
+    async def click_button(
+        self, chat_id: int | str, message_id: int, value: str
+    ) -> TelegramCallbackAnswer:
         message = await self._call(self.client.get_messages(chat_id, message_id))
         markup = getattr(message, "reply_markup", None)
         rows = getattr(markup, "inline_keyboard", None) or getattr(
@@ -131,7 +134,13 @@ class KurigramTelegramAdapter:
         if len(positions) != 1:
             raise TelegramTransientError("button disappeared before click")
         row, column = positions[0]
-        await self._call(message.click(column, row))
+        answer = await self._call(message.click(column, row))
+        return TelegramCallbackAnswer(
+            text=str(getattr(answer, "message", "") or ""),
+            show_alert=bool(
+                getattr(answer, "alert", getattr(answer, "show_alert", False))
+            ),
+        )
 
     async def wait_for_message(
         self,
@@ -305,7 +314,7 @@ class LazyAccountTelegramAdapter:
 
     async def click_button(
         self, chat_id: int | str, message_id: int, value: str
-    ) -> None:
+    ) -> TelegramCallbackAnswer:
         return await (await self._adapter()).click_button(chat_id, message_id, value)
 
     async def wait_for_message(

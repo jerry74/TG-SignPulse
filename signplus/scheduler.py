@@ -49,11 +49,13 @@ class RunCoordinator:
         engine_for_account: Callable[[str], CheckInEngine],
         random_source: RandomSource | None = None,
         failure_notifier: FailureNotifier | None = None,
+        now_source: Callable[[], datetime] | None = None,
     ) -> None:
         self._store = store
         self._engine_for_account = engine_for_account
         self._random = random_source or Random()
         self._notifier = failure_notifier or NullFailureNotifier()
+        self._now_source = now_source
 
     async def tick(self, now: datetime) -> DispatchResult:
         if now.tzinfo is None:
@@ -81,7 +83,7 @@ class RunCoordinator:
                     task=assignment.definition,
                 )
             )
-            self._store.finish_run(run.id, result, now)
+            self._store.finish_run(run.id, result, self._finished_at(now))
             if result.code == "ACCOUNT_UNAUTHORIZED":
                 self._store.set_account_status(assignment.account_name, "reauth_required")
             if result.success:
@@ -105,7 +107,7 @@ class RunCoordinator:
         result = await self._engine_for_account(account_name).execute(
             RunCommand(run.id, account_name, assignment.definition)
         )
-        self._store.finish_run(run.id, result, now)
+        self._store.finish_run(run.id, result, self._finished_at(now))
         if result.code == "ACCOUNT_UNAUTHORIZED":
             self._store.set_account_status(account_name, "reauth_required")
         if not result.success:
@@ -115,6 +117,14 @@ class RunCoordinator:
                 result=result,
             )
         return self._store.get_run(run.id)
+
+    def _finished_at(self, started_at: datetime) -> datetime:
+        if self._now_source is not None:
+            value = self._now_source()
+            if value.tzinfo is None:
+                raise ValueError("now_source must return a timezone-aware datetime")
+            return value
+        return datetime.now(started_at.tzinfo)
 
     async def _notify_failure(
         self, *, task_name: str, account_name: str, result: RunResult

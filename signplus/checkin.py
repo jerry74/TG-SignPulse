@@ -12,6 +12,7 @@ from typing import Protocol, TypeVar
 
 from .challenge import CaptionArithmeticSolver, ChallengeError
 from .scenario import (
+    TelegramCallbackAnswer,
     TelegramFloodWaitError,
     TelegramMessage,
     TelegramTimeout,
@@ -84,7 +85,9 @@ class TelegramPort(Protocol):
 
     async def send_dice(self, chat_id: int | str, value: str, thread_id: int | None = None) -> None: ...
 
-    async def click_button(self, chat_id: int | str, message_id: int, value: str) -> None: ...
+    async def click_button(
+        self, chat_id: int | str, message_id: int, value: str
+    ) -> TelegramCallbackAnswer: ...
 
     async def wait_for_message(
         self,
@@ -173,7 +176,7 @@ class CheckInEngine:
                     if button is None:
                         return self._failure("BUTTON_NOT_FOUND", events)
                     message_id = current.id
-                    await self._retry_operation(
+                    callback = await self._retry_operation(
                         partial(
                             self._telegram.click_button,
                             target,
@@ -183,6 +186,11 @@ class CheckInEngine:
                         events,
                     )
                     events.append({"type": "button_clicked", "button": button})
+                    terminal = self._callback_terminal(
+                        task, message_id, callback, events
+                    )
+                    if terminal is not None:
+                        return terminal
                     current = await self._wait(task, target, cursor, step.timeout_seconds)
                 elif step.kind is StepKind.SOLVE_CAPTION_ARITHMETIC:
                     current = current or await self._wait(
@@ -220,7 +228,7 @@ class CheckInEngine:
                                 )
                     message_id = current.id
                     answer_button = answer.button
-                    await self._retry_operation(
+                    callback = await self._retry_operation(
                         partial(
                             self._telegram.click_button,
                             target,
@@ -241,6 +249,11 @@ class CheckInEngine:
                             ),
                         }
                     )
+                    terminal = self._callback_terminal(
+                        task, message_id, callback, events
+                    )
+                    if terminal is not None:
+                        return terminal
                     current = await self._wait(
                         task, target, current, step.timeout_seconds
                     )
@@ -315,6 +328,28 @@ class CheckInEngine:
         if any(re.search(pattern, content) for pattern in task.success_patterns):
             return RunResult(True, "SUCCESS_CONFIRMED", "success rule matched", tuple(events))
         return None
+
+    @staticmethod
+    def _callback_terminal(
+        task: TaskDefinition,
+        message_id: int,
+        callback: TelegramCallbackAnswer,
+        events: list[dict[str, object]],
+    ) -> RunResult | None:
+        events.append(
+            {
+                "type": "button_callback_received",
+                "text_present": bool(callback.text),
+                "show_alert": callback.show_alert,
+            }
+        )
+        if not callback.text:
+            return None
+        return CheckInEngine._terminal_result(
+            task,
+            TelegramMessage(id=message_id, text=callback.text),
+            events,
+        )
 
     @staticmethod
     def _failure(code: str, events: list[dict[str, object]]) -> RunResult:

@@ -610,3 +610,171 @@ async def test_kurigram_adapter_ignores_the_sent_command_echo() -> None:
 
     assert result.code == "SUCCESS_CONFIRMED"
     assert client.menu is not None and client.menu.clicked is True
+
+
+@pytest.mark.asyncio
+async def test_callback_alert_can_confirm_success_without_a_followup_message() -> None:
+    telegram = ScenarioTelegramAdapter(
+        {
+            "version": 1,
+            "initial_messages": [
+                {"id": 10, "text": "menu", "buttons": ["check-in"]}
+            ],
+            "interactions": [
+                {
+                    "operation": {"type": "click_button", "value": "check-in"},
+                    "callback": {"text": "check-in successful", "show_alert": True},
+                }
+            ],
+        }
+    )
+    task = TaskDefinition(
+        "callback-success",
+        1,
+        (Step(StepKind.CLICK_BUTTON, "check-in"),),
+        ("successful",),
+        ("failed",),
+    )
+
+    result = await CheckInEngine(telegram).execute(RunCommand("r", "a", task))
+
+    assert result.code == "SUCCESS_CONFIRMED"
+    assert [event["type"] for event in result.events] == [
+        "run_started",
+        "button_clicked",
+        "button_callback_received",
+    ]
+    telegram.assert_complete()
+
+
+@pytest.mark.asyncio
+async def test_empty_callback_ack_is_recorded_before_followup_timeout() -> None:
+    telegram = ScenarioTelegramAdapter(
+        {
+            "version": 1,
+            "initial_messages": [
+                {"id": 10, "text": "menu", "buttons": ["check-in"]}
+            ],
+            "interactions": [
+                {"operation": {"type": "click_button", "value": "check-in"}}
+            ],
+        }
+    )
+    task = TaskDefinition(
+        "callback-timeout",
+        1,
+        (Step(StepKind.CLICK_BUTTON, "check-in"),),
+        ("successful",),
+        ("failed",),
+    )
+
+    result = await CheckInEngine(telegram).execute(RunCommand("r", "a", task))
+
+    assert result.code == "TELEGRAM_TIMEOUT"
+    callback_event = result.events[-1]
+    assert callback_event == {
+        "type": "button_callback_received",
+        "text_present": False,
+        "show_alert": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_challenge_answer_callback_can_confirm_success() -> None:
+    telegram = ScenarioTelegramAdapter(
+        {
+            "version": 1,
+            "initial_messages": [
+                {"id": 20, "text": "menu", "buttons": ["check-in"]}
+            ],
+            "interactions": [
+                {
+                    "operation": {"type": "click_button", "value": "check-in"},
+                    "emit": [
+                        {
+                            "id": 21,
+                            "caption": "2 + 3 = ?",
+                            "buttons": ["4", "5", "6"],
+                        }
+                    ],
+                },
+                {
+                    "operation": {"type": "click_button", "value": "5"},
+                    "callback": {"text": "check-in successful", "show_alert": True},
+                }
+            ],
+        }
+    )
+    task = TaskDefinition(
+        "challenge-callback-success",
+        1,
+        (
+            Step(StepKind.CLICK_BUTTON, "check-in"),
+            Step(StepKind.SOLVE_CAPTION_ARITHMETIC),
+        ),
+        ("successful",),
+        ("failed",),
+    )
+
+    result = await CheckInEngine(telegram).execute(RunCommand("r", "a", task))
+
+    assert result.code == "SUCCESS_CONFIRMED"
+    assert [event["type"] for event in result.events] == [
+        "run_started",
+        "button_clicked",
+        "button_callback_received",
+        "challenge_solved",
+        "button_callback_received",
+    ]
+    telegram.assert_complete()
+
+
+@pytest.mark.asyncio
+async def test_kurigram_callback_alert_is_visible_to_the_checkin_engine() -> None:
+    class CallbackAnswer:
+        message = "check-in successful"
+        alert = True
+
+    class RawMessage:
+        id = 10
+        text = "menu"
+        caption = ""
+        outgoing = False
+        message_thread_id = None
+        reply_markup = type(
+            "Markup",
+            (),
+            {"inline_keyboard": [[type("Button", (), {"text": "check-in"})()]]},
+        )()
+
+        async def click(self, column: int, row: int) -> CallbackAnswer:
+            assert (column, row) == (0, 0)
+            return CallbackAnswer()
+
+    class Client:
+        message = RawMessage()
+
+        async def get_chat_history(self, chat_id: int, limit: int):
+            assert chat_id == 1
+            del limit
+            yield self.message
+
+        async def get_messages(self, chat_id: int, message_id: int) -> RawMessage:
+            assert (chat_id, message_id) == (1, 10)
+            return self.message
+
+    task = TaskDefinition(
+        "callback-success",
+        1,
+        (Step(StepKind.CLICK_BUTTON, "check-in", timeout_seconds=1),),
+        ("successful",),
+        ("failed",),
+    )
+
+    result = await CheckInEngine(
+        KurigramTelegramAdapter(Client(), poll_interval=0)
+    ).execute(RunCommand("r", "a", task))
+
+    assert result.code == "SUCCESS_CONFIRMED"
+    callback_event = result.events[-1]
+    assert callback_event["show_alert"] is True

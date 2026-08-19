@@ -78,6 +78,50 @@ async def test_due_task_runs_once_and_survives_coordinator_restart(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_run_records_the_actual_completion_time(tmp_path: Path) -> None:
+    store = SignPlusStore(tmp_path / "completion-time.sqlite")
+    store.migrate()
+    store.add_account("primary", "encrypted-placeholder")
+    store.create_task(
+        "task-completion-time",
+        TaskDefinition(
+            "completion-time",
+            1,
+            (Step(StepKind.SEND_TEXT, "/checkin"),),
+            ("success",),
+            ("failed",),
+        ),
+        DailySchedule.fixed("08:00"),
+        ("primary",),
+        True,
+    )
+    telegram = ScenarioTelegramAdapter(
+        {
+            "version": 1,
+            "initial_messages": [],
+            "interactions": [
+                {
+                    "operation": {"type": "send_text", "value": "/checkin"},
+                    "emit": [{"id": 1, "text": "success"}],
+                }
+            ],
+        }
+    )
+    started = datetime(2026, 8, 19, 16, 37, 30, tzinfo=ZoneInfo("Asia/Taipei"))
+    finished = started + timedelta(seconds=31)
+    coordinator = RunCoordinator(
+        store,
+        lambda _: CheckInEngine(telegram),
+        now_source=lambda: finished,
+    )
+
+    run = await coordinator.run_now("task-completion-time", "primary", started)
+
+    assert run.started_at == started.isoformat()
+    assert run.finished_at == finished.isoformat()
+
+
+@pytest.mark.asyncio
 async def test_random_window_time_is_persisted_across_restart(tmp_path: Path) -> None:
     store = SignPlusStore(tmp_path / "window.sqlite")
     store.migrate()

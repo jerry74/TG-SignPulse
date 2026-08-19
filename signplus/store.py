@@ -41,6 +41,8 @@ class StoredRun:
     code: str | None
     message: str | None
     events: tuple[dict[str, object], ...]
+    started_at: str | None
+    finished_at: str | None
 
 
 class SignPlusStore:
@@ -470,4 +472,6 @@ class SignPlusStore:
             code=row["code"],
             message=row["message"],
             events=events,
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
         )
