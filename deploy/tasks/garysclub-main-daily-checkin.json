@@ -1,0 +1,42 @@
+{
+  "id": "garysclub-main-daily-checkin",
+  "name": "GarysClub 每日打卡",
+  "account_names": [
+    "main"
+  ],
+  "chat_id": 8926962437,
+  "chat_username": "garysclubsubbot",
+  "thread_id": null,
+  "schedule": {
+    "kind": "window",
+    "start": "08:00",
+    "end": "19:00"
+  },
+  "steps": [
+    {
+      "kind": "send_text",
+      "value": "/start",
+      "match_mode": "exact",
+      "timeout_seconds": 30
+    },
+    {
+      "kind": "click_button",
+      "value": "📅 立即打卡签到",
+      "match_mode": "exact",
+      "timeout_seconds": 30
+    }
+  ],
+  "success_patterns": [
+    "今日已打卡",
+    "打卡成功",
+    "签到成功",
+    "已打卡"
+  ],
+  "failure_patterns": [
+    "打卡失败",
+    "签到失败",
+    "操作失败",
+    "验证失败"
+  ],
+  "enabled": false
+}
